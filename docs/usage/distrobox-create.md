@@ -16,7 +16,8 @@ graphical apps (X11/Wayland), and audio.
 **distrobox create**
 
 	--image/-i:		image to use for the container	default: ${container_image_default}
-	--name/-n:		name for the distrobox		default: ${container_name_default}
+	--name/-n:		name for the distrobox          default: ${container_name_default}
+	--hostname:		hostname for the distrobox      default: <container-name>.$(uname -n)
 	--pull/-p:		pull the image even if it exists locally (implies --yes)
 	--yes/-Y:		non-interactive, pull images without asking
 	--root/-r:		launch podman/docker/lilipod with root privileges. Note that if you need root this is the preferred
@@ -29,15 +30,18 @@ graphical apps (X11/Wayland), and audio.
 	--volume:		additional volumes to add to the container
 	--additional-flags/-a:	additional flags to pass to the container manager command
 	--additional-packages/-ap:	additional packages to install during initial container setup
-	--init-hooks:		additional commands to execute during container initialization
-	--pre-init-hooks:	additional commands to execute prior to container initialization
+	--init-hooks:		additional commands to execute at the end of container initialization
+	--pre-init-hooks:	additional commands to execute at the start of container initialization
 	--init/-I:		use init system (like systemd) inside the container.
 				this will make host's processes not visible from within the container. (assumes --unshare-process)
+				may require additional packages depending on the container image: https://github.com/89luca89/distrobox/blob/main/docs/useful_tips.md#using-init-system-inside-a-distrobox
 	--nvidia:		try to integrate host's nVidia drivers in the guest
+	--platform:		specify which platform to use, eg: linux/arm64
 	--unshare-devsys:          do not share host devices and sysfs dirs from host
-	--unshare-ipc:          do not share ipc namemspace with host
+	--unshare-groups:          do not forward user's additional groups into the container
+	--unshare-ipc:          do not share ipc namespace with host
 	--unshare-netns:        do not share the net namespace with host
-	--unshare-process:          do not share process namemspace with host
+	--unshare-process:          do not share process namespace with host
 	--unshare-all:          activate all the unshare flags below
 	--compatibility/-C:	show list of compatible images
 	--help/-h:		show this message
@@ -95,7 +99,7 @@ Use pre-init-hooks to perform an action at the beginning of the container startu
 
 Use init to create a Systemd container (acts similar to an LXC):
 
-	distrobox create -i ubuntu:latest --name test --additional-packages "systemd libpam-systemd" --init
+	distrobox create -i ubuntu:latest --name test --additional-packages "systemd libpam-systemd pipewire-audio-client-libraries" --init
 
 Use init to create a OpenRC container (acts similar to an LXC):
 
@@ -129,6 +133,7 @@ Use environment variables to specify container name, image and container manager
 	DBX_CONTAINER_IMAGE
 	DBX_CONTAINER_MANAGER
 	DBX_CONTAINER_NAME
+	DBX_CONTAINER_HOSTNAME
 	DBX_NON_INTERACTIVE
 	DBX_SUDO_PROGRAM
 
@@ -191,11 +196,11 @@ This is needed because `/sbin/init` must be pid 1.
 If you want to use a non-pre-create image, you'll need to add the additional package:
 
 	distrobox create -i alpine:latest --init --additional-packages "openrc" -n test
-	distrobox create -i debian:stable --init --additional-packages "systemd libpam-systemd" -n test
-	distrobox create -i ubuntu:22.04 --init --additional-packages "systemd libpam-systemd" -n test
+	distrobox create -i debian:stable --init --additional-packages "systemd libpam-systemd pipewire-audio-client-libraries" -n test
+	distrobox create -i ubuntu:22.04 --init --additional-packages "systemd libpam-systemd pipewire-audio-client-libraries" -n test
 	distrobox create -i archlinux:latest --init --additional-packages "systemd" -n test
 	distrobox create -i registry.opensuse.org/opensuse/tumbleweed:latest --init --additional-packages "systemd" -n test
-	distrobox create -i registry.fedoraproject.org/fedora:38 --init --additional-packages "systemd" -n test
+	distrobox create -i registry.fedoraproject.org/fedora:39 --init --additional-packages "systemd" -n test
 
 The `--init` flag is useful to create system containers, where the container acts
 more similar to a full VM than an application-container.

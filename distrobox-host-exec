@@ -18,6 +18,11 @@
 # You should have received a copy of the GNU General Public License
 # along with distrobox; if not, see <http://www.gnu.org/licenses/>.
 
+# Ensure we have our env variables correctly set
+[ -z "${USER}" ] && USER="$(id -run)"
+[ -z "${HOME}" ] && HOME="$(getent passwd "${USER}" | cut -d':' -f6)"
+[ -z "${SHELL}" ] && SHELL="$(getent passwd "${USER}" | cut -d':' -f7)"
+
 # Defaults
 host_command=""
 non_interactive=0
@@ -27,18 +32,23 @@ if [ ! -t 1 ] ||
 	non_interactive=1
 fi
 distrobox_host_exec_default_command="${SHELL:-/bin/sh}"
-host_spawn_version="1.5.0"
+host_spawn_version="v1.6.0"
 download_command=""
 sudo_command=""
 verbose=0
-version="1.5.0.2"
+version="1.8.1.2"
 
-# Print usage to stdout.
+# show_help will print usage to stdout.
 # Arguments:
+#   None
+# Expected global variables:
+#   version: distrobox version
+# Expected env variables:
 #   None
 # Outputs:
 #   print usage with examples.
-show_help() {
+show_help()
+{
 	cat << EOF
 distrobox version: ${version}
 
@@ -140,6 +150,12 @@ elif  command -v wget > /dev/null 2>&1; then
 	download_command="wget -qO"
 fi
 
+# Normalize architecture name to comply to golang/release naming
+architecture="$(uname -m)"
+if echo "${architecture}" | grep -q armv; then
+	architecture="$(echo "${architecture}" | grep -Eo "armv[0-9]+")"
+fi
+
 # Setup host-spawn as a way to execute commands back on the host
 if ! command -v host-spawn > /dev/null ||
 	[ "$(printf "%s\n%s\n" "${host_spawn_version}" "$(host-spawn --version)" |
@@ -160,7 +176,7 @@ if ! command -v host-spawn > /dev/null ||
 		y | Y | Yes | yes | YES)
 			# Download matching version with current distrobox
 			if ! ${download_command} /tmp/host-spawn \
-				"https://github.com/1player/host-spawn/releases/download/${host_spawn_version}/host-spawn-$(uname -m)"; then
+				"https://github.com/1player/host-spawn/releases/download/${host_spawn_version}/host-spawn-${architecture}"; then
 
 				printf "Error: Cannot download host-spawn\n"
 				exit 1
@@ -186,6 +202,8 @@ fi
 # This makes host-spawn work on initful containers, where the dbus session is
 # separate from the host, we point the dbus session straight to the host's socket
 # in order to talk with the org.freedesktop.Flatpak.Development.HostCommand on the host
+[ -z "${XDG_RUNTIME_DIR:-}" ] && XDG_RUNTIME_DIR="/run/user/$(id -ru)"
+[ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ] && DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$(id -ru)/bus"
 XDG_RUNTIME_DIR="/run/host/${XDG_RUNTIME_DIR}"
 DBUS_SESSION_BUS_ADDRESS="unix:path=/run/host/$(echo "${DBUS_SESSION_BUS_ADDRESS}" | cut -d '=' -f2-)"
 
@@ -202,6 +220,7 @@ DBUS_SESSION_BUS_ADDRESS="unix:path=/run/host/$(echo "${DBUS_SESSION_BUS_ADDRESS
 # Also, we don't initialize a pty, if we're not in a tty.
 if [ "$(basename "${host_command}")" = "xdg-open" ] ||
 	[ "$(basename "${host_command}")" = "gio" ] ||
+	[ "$(basename "${host_command}")" = "flatpak" ] ||
 	[ ! -t 1 ] ||
 	! tty > /dev/null 2>&1; then
 

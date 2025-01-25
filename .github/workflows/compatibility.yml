@@ -30,7 +30,7 @@ jobs:
       distrobox_changed: ${{ steps.check_file_changed.outputs.distrobox_changed }}
     steps:
 
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
         with:
           # Checkout as many commits as needed for the diff
           fetch-depth: 2
@@ -55,35 +55,37 @@ jobs:
       github.event.inputs.run_always == 'True'
     steps:
 
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
 
       # Fetch from compatibility table all the distros supported
       - id: set-matrix
         run: |
+            skip_list="bazzite|slackware|stream8|ublue"
+
             echo "::set-output name=targets::$(sed -n -e '/| Alma/,/| Void/ p' docs/compatibility.md |
             cut -d'|' -f 4 |
             sed 's/<br>/\n/g' |
             tr -d ' ' |
             sed '/^[[:space:]]*$/d' |
-            sort -u |
+            sort -u | grep -Ev "${skip_list}" |
             jq -R -s -c 'split("\n")[:-1]')"
 
   run:
-
     runs-on: ubuntu-latest
     needs: setup
+    timeout-minutes: 30
     strategy:
       fail-fast: false
-      max-parallel: 8
       matrix:
         distribution: ${{fromJSON(needs.setup.outputs.targets)}}
-        container_manager: ["podman", "docker"]
+        container_manager: ["podman"] #, "docker"]
     env:
+      XDG_CACHE_HOME: "/tmp/"
       DBX_CONTAINER_MANAGER: ${{ matrix.container_manager }}
 
     steps:
       # Checks-out your repository under $GITHUB_WORKSPACE, so your job can access it
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
 
       # Ensure distrobox create works:
       - name: Distrobox create
@@ -92,16 +94,16 @@ jobs:
           image=${{ matrix.distribution }}
           container_name="$(basename "${image}" | sed -E 's/[:.]/-/g')"
           ${DBX_CONTAINER_MANAGER} pull "${image}"
-          ./distrobox create --yes -i "${image}" --name "${container_name}"
-          #case "${container_name}" in
-          #  *init*)
-          #    echo "SYSTEMD DETECTED: creating container with --init..."
-          #    ./distrobox create --yes -i "${image}" --name "${container_name}" --init
-          #    ;;
-          #  *)
-          #    ./distrobox create --yes -i "${image}" --name "${container_name}"
-          #    ;;
-          # esac
+          # ./distrobox create --yes --absolutely-disable-root-password-i-am-really-positively-sure -i "${image}" --name "${container_name}"
+          case "${container_name}" in
+            *init*)
+              echo "SYSTEMD DETECTED: creating container with --init..."
+              ./distrobox create --yes -i "${image}" --hostname "${container_name}" --name "${container_name}" --init --unshare-all
+              ;;
+            *)
+              ./distrobox create --yes -i "${image}" --hostname "${container_name}" --name "${container_name}"
+              ;;
+          esac
 
       # Ensure distrobox enter and init works:
       - name: Distrobox enter - init
@@ -109,20 +111,15 @@ jobs:
         run: |
           image=${{ matrix.distribution }}
           container_name="$(basename "${image}" | sed -E 's/[:.]/-/g')"
-          ./distrobox enter --name "${container_name}" -- whoami
-          # Temporary disable systemd init on github runners, it seems to be incompatible
-          # with runner services:
-          #   Failed to create /system.slice/runner-provisioner.service/init.scope control group: Permission denied
-          # works fine otherwise.
-          # case "${container_name}" in
-          #   *init*)
-          #     echo "SYSTEMD DETECTED: performing systemctl check..."
-          #     ./distrobox enter --name "${container_name}" -- systemctl status --no-pager
-          #     ;;
-          #   *)
-          #     ./distrobox enter --name "${container_name}" -- whoami
-          #     ;;
-          # esac
+          case "${container_name}" in
+            *init*)
+              echo "SYSTEMD DETECTED: performing systemctl check..."
+              ./distrobox enter --name "${container_name}" -- systemctl is-system-running | grep -E "degraded|running|starting"
+              ;;
+            *)
+              ./distrobox enter --name "${container_name}" -- whoami
+              ;;
+          esac
 
       # Ensure distrobox enter and init works:
       - name: Distrobox enter - user
@@ -147,7 +144,7 @@ jobs:
           # Assert that distrobox exported binary indeed works
           set -x
           command_output="$(./distrobox enter --name "${container_name}" -- uname -n | tr -d '\r' | tr -d '^@')"
-          expected_output="${container_name}.$(uname -n)"
+          expected_output="${container_name}"
           if [ "$command_output" != "$expected_output" ]; then
             exit 1
           fi
@@ -162,7 +159,7 @@ jobs:
           # Assert that distrobox exported binary indeed works
           set -x
           command_output="$(${HOME}/uname -n | tr -d '\r' | tr -d '^@')"
-          expected_output="${container_name}.$(uname -n)"
+          expected_output="${container_name}"
           if [ "$command_output" != "$expected_output" ]; then
             exit 1
           fi
@@ -178,7 +175,7 @@ jobs:
           # Assert that distrobox exported binary indeed works
           set -x
           command_output="$(${HOME}/uname -n | tr -d '\r' | tr -d '^@')"
-          expected_output="${container_name}.$(uname -n)"
+          expected_output="${container_name}"
           if [ "$command_output" != "$expected_output" ]; then
             exit 1
           fi
@@ -205,8 +202,8 @@ jobs:
           ./distrobox stop --yes "${container_name}"
 
       # Ensure distrobox rm works:
-      - name: Distrobox logs on failure
-        if: ${{ failure() }}
+      - name: Distrobox logs
+        if: ${{ always() }}
         run: |
           image=${{ matrix.distribution }}
           container_name="$(basename "${image}" | sed -E 's/[:.]/-/g')"
@@ -219,3 +216,4 @@ jobs:
           image=${{ matrix.distribution }}
           container_name="$(basename "${image}" | sed -E 's/[:.]/-/g')"
           ./distrobox rm --force "${container_name}"
+          $DBX_CONTAINER_MANAGER rmi -f "${image}"

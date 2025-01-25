@@ -1,5 +1,5 @@
 - [Distrobox](README.md)
-  - [Launch a distrobox from you applications list](#launch-a-distrobox-from-you-applications-list)
+  - [Launch a distrobox from your applications list](#launch-a-distrobox-from-your-applications-list)
   - [Create a distrobox with a custom HOME directory](#create-a-distrobox-with-a-custom-home-directory)
   - [Mount additional volumes in a distrobox](#mount-additional-volumes-in-a-distrobox)
   - [Use a different shell than the host](#use-a-different-shell-than-the-host)
@@ -10,7 +10,6 @@
   - [Export to the host](#export-to-the-host)
   - [Execute commands on the host](#execute-commands-on-the-host)
   - [Resolve "Error cannot open display: :0"](#resolve-error-cannot-open-display-0)
-  - [Enable SSH X-Forwarding when SSH-ing in a distrobox](#enable-ssh-x-forwarding-when-ssh-ing-in-a-distrobox)
   - [Using init system inside a distrobox](#using-init-system-inside-a-distrobox)
   - [Using Docker inside a Distrobox](#using-docker-inside-a-distrobox)
   - [Using Podman inside a Distrobox](#using-podman-inside-a-distrobox)
@@ -28,21 +27,28 @@
   - [Check used resources](#check-used-resources)
   - [Pre-installing additional package repositories](#pre-installing-additional-package-repositories)
   - [Apply resource limitation on the fly](#apply-resource-limitation-on-the-fly)
+  - [Copy/yank text to host clipboard](#copy-text-to-host-clipboard)
 
 ---
 
 # Useful tips
 
-## Launch a distrobox from you applications list
+## Detect if you're in a distrobox
+
+Being this tightly integrated, it may be useful to know when you're in a container or not.
+
+To detect you can just check the environment variable `"${CONTAINER_ID}"`, if set, you're in a distrobox.
+
+## Launch a distrobox from your applications list
 
 Starting from distrobox 1.4.0, containers created will automatically generate a desktop entry.
 For containers generated with older versions, you can use:
 
-`distrobox generate-entry you-container-name`
+`distrobox generate-entry your-container-name`
 
 To delete it:
 
-`distrobox generate-entry you-container-name --delete`
+`distrobox generate-entry your-container-name --delete`
 
 ## Create a distrobox with a custom HOME directory
 
@@ -210,24 +216,8 @@ to your `~/.distroboxrc`
 
 ```console
 -$ cat ~/.distroboxrc
-xhost +si:localuser:$USER`
+xhost +si:localuser:$USER >/dev/null
 ```
-
-## Enable SSH X-Forwarding when SSH-ing in a distrobox
-
-SSH X-forwarding by default will not work because the container hostname is
-different from the host's one.
-You can create a distrobox with will have the same hostname as the host by
-creating it with the following init-hook:
-
-```sh
-distrobox create --name test --image your-chosen-image:tag \
-                  --init-hooks '"$(uname -n)" > /etc/hostname'`
-```
-
-This will ensure SSH X-Forwarding will work when SSH-ing inside the distrobox:
-
-`ssh -X myhost distrobox enter test -- xclock`
 
 ## Using init system inside a distrobox
 
@@ -251,11 +241,11 @@ If you want to use a non-pre-create image, you'll need to add the additional pac
 
 ```console
 distrobox create -i alpine:latest --init --additional-packages "openrc" -n test
-distrobox create -i debian:stable --init --additional-packages "systemd libpam-systemd" -n test
-distrobox create -i ubuntu:22.04 --init --additional-packages "systemd libpam-systemd" -n test
+distrobox create -i debian:stable --init --additional-packages "systemd libpam-systemd pipewire-audio-client-libraries" -n test
+distrobox create -i ubuntu:22.04 --init --additional-packages "systemd libpam-systemd pipewire-audio-client-libraries" -n test
 distrobox create -i archlinux:latest --init --additional-packages "systemd" -n test
 distrobox create -i registry.opensuse.org/opensuse/tumbleweed:latest --init --additional-packages "systemd" -n test
-distrobox create -i registry.fedoraproject.org/fedora:38 --init --additional-packages "systemd" -n test
+distrobox create -i registry.fedoraproject.org/fedora:39 --init --additional-packages "systemd" -n test
 ```
 
 Note however that in this mode, you'll not be able to access host's processes
@@ -289,7 +279,7 @@ user@test:~$ sudo systemctl status sshd
 
 You may want to run a separate instance of docker inside your container.
 In order to do this, create a [container with an init system](#using-init-system-inside-a-distrobox)
-**using a podman rootful container or using docker** using the **unshare-all flag**
+using rootful Podman or Docker and using the **unshare-all** flag.
 
 Example:
 
@@ -333,24 +323,24 @@ luca-linux@tumbleweed:~$ sudo docker run --rm -ti alpine
 ## Using Podman inside a Distrobox
 
 You may want to run a separate instance of podman inside your container.
-In order to do this, create a container using the **unshare-all flag**, the
-container manager can be anyone of choice.
+In order to do this, create a container using using rootful Podman or Docker
+and using the **unshare-all** flag.
 
 Example:
 
 ```sh
-distrobox create \
+distrobox create --root \
   --image registry.opensuse.org/opensuse/distrobox:latest \
-  --additional-packages "podman crun" \
+  --additional-packages "podman" \
   --unshare-all
 ```
 
-Inside it install podman, and add suduids for the user:
+Inside it install podman, and add subuids for the user:
 
 ```sh
 sudo usermod --add-subuids 10000-65536 $USER
 sudo usermod --add-subgids 10000-65536 $USER
-cat << EOF > /etc/containers/containers.conf
+cat << EOF | sudo tee /etc/containers/containers.conf
 [containers]
 netns="host"
 userns="host"
@@ -377,7 +367,7 @@ luca-linux@tumbleweed:~> sudo podman run --rm -ti alpine
 
 You may want to run an LXC instance inside your container.
 In order to do this, create a [container with an init system](#using-init-system-inside-a-distrobox)
-using the **unshare-all flag**, this works with either docker, rootful podman, or rootless podman.
+using the **unshare-all** flag, this works with either docker, rootful podman, or rootless podman.
 
 Example:
 
@@ -588,7 +578,7 @@ aarch64
 
 ## Using the GPU inside the container
 
-For Intel and AMD Gpus, the support is backed in, as the containers will install
+For Intel and AMD GPUs, the support is baked in, as the containers will install
 their latest available mesa/dri drivers.
 
 For NVidia, you can use the `--nvidia` flag during create, see [distrobox-create](./usage/distrobox-create.md)
@@ -604,8 +594,16 @@ Alternatively from the `--nvidia` flag, you can use NVidia's own [nvidia-contain
 After following the [official guide to set nvidia-ctk up](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/user-guide.html)
 you can use it from distrobox doing:
 
+In case of podman container manager, run:
+
 ```console
-distrobox create --name example-nvidia-toolkit --additional-flags "--runtime=nvidia -e NVIDIA_VISIBLE_DEVICES=all -e NVIDIA_DRIVER_CAPABILITIES=all" --image nvidia/cuda
+distrobox create --name example-nvidia-toolkit --additional-flags "--gpus all" --image  docker.io/nvidia/cuda
+```
+
+In case of docker container manager, run:
+
+```console
+distrobox create --name example-nvidia-toolkit --additional-flags "--gpus all --device=nvidia.com/gpu=all" --image  docker.io/nvidia/cuda
 ```
 
 ## Slow creation on podman and image size getting bigger with distrobox create
@@ -663,7 +661,7 @@ with podman:
 
 ```sh
 podman container commit -p distrobox_name image_name_you_choose
-podman save image_name_you_choose:latest | gzip > image_name_you_choose.tar.gz
+podman save image_name_you_choose:latest | bzip2 > image_name_you_choose.tar.bz
 ```
 
 with docker:
@@ -681,7 +679,7 @@ Now you can backup that archive or transfer it to another host, and to restore i
 just run
 
 ```sh
-podman load < image_name_you_choose.tar.gz
+podman load < image_name_you_choose.tar.bz2
 ```
 
 or
@@ -837,3 +835,8 @@ Then reload systemd daemon to apply the changes:
 ```bash
 systemctl --user daemon-reload
 ```
+
+## Copy text to host clipboard
+
+To copy/yank text from the container to the host clipboard you need to install
+`xsel` in the container for Xorg hosts or `wlroots` for wayland hosts.

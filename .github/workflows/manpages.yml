@@ -21,9 +21,12 @@ jobs:
       distrobox_changed: ${{ steps.check_file_changed.outputs.distrobox_changed }}
     steps:
 
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
         with:
           # Checkout as many commits as needed for the diff
+          repository: 89luca89/distrobox
+          ref: main
+          persist-credentials: false
           fetch-depth: 2
           token: ${{ secrets.PAT }}
 
@@ -42,14 +45,14 @@ jobs:
     if: needs.check_changes.outputs.distrobox_changed == 'True'
     steps:
 
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
         with:
           token: ${{ secrets.PAT }}
 
       # Fetch from compatibility table all the distros supported
       - id: generate
         run: |
-          VERSION=2.19.2
+          VERSION=3.6.1
           RELEASE="jgm/pandoc/releases/download/${VERSION}/pandoc-${VERSION}-1-amd64.deb"
           NAME=$(echo $RELEASE | rev | cut -d'/' -f1 | rev)
 
@@ -62,7 +65,7 @@ jobs:
 
           man/gen-man
 
-      - uses: stefanzweifel/git-auto-commit-action@v4
+      - uses: stefanzweifel/git-auto-commit-action@v5
         with:
           branch: main
           commit_message: Automatic Man Page Update

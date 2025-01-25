@@ -18,26 +18,35 @@
 # You should have received a copy of the GNU General Public License
 # along with distrobox; if not, see <http://www.gnu.org/licenses/>.
 
+# Ensure we have our env variables correctly set
+[ -z "${USER}" ] && USER="$(id -run)"
+[ -z "${HOME}" ] && HOME="$(getent passwd "${USER}" | cut -d':' -f6)"
+[ -z "${SHELL}" ] && SHELL="$(getent passwd "${USER}" | cut -d':' -f7)"
+
 # POSIX
 #
 default_input_file="./distrobox.ini"
 delete=-1
 distrobox_path="$(dirname "${0}")"
 dryrun=0
+boxname=""
 input_file=""
 replace=0
-boxname=""
+root_flag=""
 # tmpfile will be used as a little buffer to pass variables without messing up
 # quoting and escaping
 tmpfile="$(mktemp -u)"
+tmp_download_file="$(mktemp -u)"
 verbose=0
-version="1.5.0.2"
+version="1.8.1.2"
 # initializing block of variables used in the manifest
 additional_flags=""
 additional_packages=""
 entry=""
 home=""
+hostname=""
 image=""
+clone=""
 init=""
 init_hooks=""
 nvidia=""
@@ -56,7 +65,7 @@ exported_bins=""
 exported_bins_path="${HOME}/.local/bin"
 
 # Cleanup tmpfiles on exit
-trap 'rm -f ${tmpfile}' EXIT
+trap 'rm -f ${tmpfile} ${tmp_download_file}' EXIT
 
 # Despite of running this script via SUDO/DOAS being not supported (the
 # script itself will call the appropriate tool when necessary), we still want
@@ -70,12 +79,49 @@ if [ -n "${SUDO_USER}" ] || [ -n "${DOAS_USER}" ]; then
 	exit 1
 fi
 
-# Print usage to stdout.
+# Source configuration files, this is done in an hierarchy so local files have
+# priority over system defaults
+# leave priority to environment variables.
+#
+# On NixOS, for the distrobox derivation to pick up a static config file shipped
+# by the package maintainer the path must be relative to the script itself.
+self_dir="$(dirname "$(realpath "$0")")"
+nix_config_file="${self_dir}/../share/distrobox/distrobox.conf"
+
+config_files="
+	${nix_config_file}
+	/usr/share/distrobox/distrobox.conf
+	/usr/share/defaults/distrobox/distrobox.conf
+	/usr/etc/distrobox/distrobox.conf
+	/usr/local/share/distrobox/distrobox.conf
+	/etc/distrobox/distrobox.conf
+	${XDG_CONFIG_HOME:-"${HOME}/.config"}/distrobox/distrobox.conf
+	${HOME}/.distroboxrc
+"
+for config_file in ${config_files}; do
+	# Shellcheck will give error for sourcing a variable file as it cannot follow
+	# it. We don't care so let's disable this linting for now.
+	# shellcheck disable=SC1090
+	[ -e "${config_file}" ] && . "$(realpath "${config_file}")"
+done
+
+[ -n "${DBX_VERBOSE}" ] && verbose="${DBX_VERBOSE}"
+
+# Fixup variable=[true|false], in case we find it in the config file(s)
+[ "${verbose}" = "true" ] && verbose=1
+[ "${verbose}" = "false" ] && verbose=0
+
+# show_help will print usage to stdout.
 # Arguments:
+#   None
+# Expected global variables:
+#   version: string distrobox version
+# Expected env variables:
 #   None
 # Outputs:
 #   print usage with examples.
-show_help() {
+show_help()
+{
 	cat << EOF
 distrobox version: ${version}
 
@@ -89,7 +135,7 @@ Usage:
 
 Options:
 
-	--file:			path to the distrobox manifest/ini file
+	--file:			path or URL to the distrobox manifest/ini file
 	--name/-n:		run against a single entry in the manifest/ini file
 	--replace/-R:		replace already existing distroboxes with matching names
 	--dry-run/-d:		only print the container manager command generated
@@ -189,20 +235,65 @@ fi
 
 # Check if file effectively exists
 if [ ! -e "${input_file}" ]; then
-	printf >&2 "File %s does not exist.\n" "${input_file}"
-	exit 1
+
+	if command -v curl > /dev/null 2>&1; then
+		download="curl --connect-timeout 3 --retry 1 -sLo"
+	elif command -v wget > /dev/null 2>&1; then
+		download="wget --timeout=3 --tries=1 -qO"
+	fi
+
+	if ! ${download} - "${input_file}" > "${tmp_download_file}"; then
+		printf >&2 "File %s does not exist.\n" "${input_file}"
+		exit 1
+	else
+		input_file="${tmp_download_file}"
+	fi
 fi
 
-# Create distrobox with parameters parsed from ini file.
+# run_distrobox will create distrobox with parameters parsed from ini file.
 # Arguments:
-#   name of the distrobox.
+#   name: name of the distrobox.
+# Expected global variables:
+#   boxname: string name of the target container
+#   tmpfile: string name of the tmpfile to read
+#   delete:  bool delete container
+#   replace: bool replace container
+#   dryrun:  bool dryrun (only print, no execute)
+#   verbose: bool verbose
+# Expected env variables:
+#   None
 # Outputs:
 #   execution of the proper distrobox-create command.
-run_distrobox() (
+run_distrobox()
+{
 	name="${1}"
+	additional_flags=""
+	additional_packages=""
+	entry=""
+	home=""
+	hostname=""
+	image=""
+	clone=""
+	init=""
+	init_hooks=""
+	nvidia=""
+	pre_init_hooks=""
+	pull=""
+	root=""
+	start_now=""
+	unshare_ipc=""
+	unshare_netns=""
+	unshare_process=""
+	unshare_devsys=""
+	unshare_all=""
+	volume=""
+	exported_apps=""
+	exported_bins=""
+	exported_bins_path="${HOME}/.local/bin"
 
 	# Skip item if --name used and no match is found
 	if [ "${boxname}" != "" ] && [ "${boxname}" != "${name}" ]; then
+		rm -f "${tmpfile}"
 		return
 	fi
 
@@ -212,16 +303,17 @@ run_distrobox() (
 		. "${tmpfile}" && rm -f "${tmpfile}"
 	fi
 
+	if [ -n "${root}" ] && [ "${root}" -eq 1 ]; then
+		root_flag="--root"
+	fi
+
 	# We're going to delete, not create!
 	if [ "${delete}" -ne 0 ] || [ "${replace}" -ne 0 ]; then
-		printf " - Deleting %s... \n" "${name}"
+		printf " - Deleting %s...\n" "${name}"
 
 		if [ "${dryrun}" -eq 0 ]; then
-			if [ -n "${root}" ] && [ "${root}" -eq 1 ]; then
-				"${distrobox_path}"/distrobox rm --root -f "${name}" > /dev/null || :
-			else
-				"${distrobox_path}"/distrobox rm -f "${name}" > /dev/null || :
-			fi
+			# shellcheck disable=SC2086,2248
+			"${distrobox_path}"/distrobox rm ${root_flag} -f "${name}" > /dev/null || :
 		fi
 
 		if [ "${delete}" -ne 0 ]; then
@@ -230,11 +322,12 @@ run_distrobox() (
 	fi
 
 	# We're going to create!
-	printf " - Creating %s... \n" "${name}"
+	printf " - Creating %s...\n" "${name}"
 
 	# If distrobox already exist, and we have replace enabled, destroy the container
 	# we have to recreate it.
-	if "${distrobox_path}"/distrobox-list | grep -qw "${name} " && [ "${dryrun}" -eq 0 ]; then
+	# shellcheck disable=SC2086,2248
+	if "${distrobox_path}"/distrobox-list ${root_flag} | grep -qw " ${name} " && [ "${dryrun}" -eq 0 ]; then
 		printf >&2 "%s already exists\n" "${name}"
 		return 0
 	fi
@@ -250,6 +343,9 @@ run_distrobox() (
 	fi
 	if [ -n "${image}" ]; then
 		result_command="${result_command} --image $(sanitize_variable "${image}")"
+	fi
+	if [ -n "${clone}" ]; then
+		result_command="${result_command} --clone $(sanitize_variable "${clone}")"
 	fi
 	if [ -n "${init}" ] && [ "${init}" -eq 1 ]; then
 		result_command="${result_command} --init"
@@ -284,17 +380,26 @@ run_distrobox() (
 	if [ -n "${home}" ]; then
 		result_command="${result_command} --home $(sanitize_variable "${home}")"
 	fi
+	if [ -n "${hostname}" ]; then
+		result_command="${result_command} --hostname $(sanitize_variable "${hostname}")"
+	fi
 	if [ -n "${init_hooks}" ]; then
 		IFS="¤"
 		args=": ;"
 		separator=""
 		for arg in ${init_hooks}; do
+			if [ -z "${arg}" ]; then
+				continue
+			fi
+
+			# Convert back from base64
+			arg="$(echo "${arg}" | base64 -d)"
 			args="${args} ${separator} ${arg}"
 
 			# Prepare for the next line, if we already have a ';' or '&&', do nothing
 			# else prefer adding '&&'
-			if ! echo "${arg}" | grep -q ';[[:space:]]\{0,1\}$' &&
-				! echo "${arg}" | grep -q '&&[[:space:]]\{0,1\}$'; then
+			if ! echo "${arg}" | grep -qE ';[[:space:]]{0,1}$' &&
+				! echo "${arg}" | grep -qE '&&[[:space:]]{0,1}$'; then
 				separator="&&"
 			else
 				separator=""
@@ -308,12 +413,18 @@ run_distrobox() (
 		args=": ;"
 		separator=""
 		for arg in ${pre_init_hooks}; do
+			if [ -z "${arg}" ]; then
+				continue
+			fi
+
+			# Convert back from base64
+			arg="$(echo "${arg}" | base64 -d)"
 			args="${args} ${separator} ${arg}"
 
 			# Prepare for the next line, if we already have a ';' or '&&', do nothing
 			# else prefer adding '&&'
-			if ! echo "${arg}" | grep -q ';[[:space:]]\{0,1\}$' &&
-				! echo "${arg}" | grep -q '&&[[:space:]]\{0,1\}$'; then
+			if ! echo "${arg}" | grep -qE ';[[:space:]]{0,1}$' &&
+				! echo "${arg}" | grep -qE '&&[[:space:]]{0,1}$'; then
 				separator="&&"
 			else
 				separator=""
@@ -325,19 +436,28 @@ run_distrobox() (
 		IFS="¤"
 		args=""
 		for packages in ${additional_packages}; do
+			if [ -z "${packages}" ]; then
+				continue
+			fi
 			args="${args} ${packages}"
 		done
 		result_command="${result_command} --additional-packages $(sanitize_variable "${args}")"
 	fi
 	if [ -n "${volume}" ]; then
-		IFS=" "
+		IFS="¤"
 		for vol in ${volume}; do
+			if [ -z "${vol}" ]; then
+				continue
+			fi
 			result_command="${result_command} --volume $(sanitize_variable "${vol}")"
 		done
 	fi
 	if [ -n "${additional_flags}" ]; then
 		IFS="¤"
 		for flag in ${additional_flags}; do
+			if [ -z "${flag}" ]; then
+				continue
+			fi
 			result_command="${result_command} --additional-flags $(sanitize_variable "${flag}")"
 		done
 	fi
@@ -352,51 +472,103 @@ run_distrobox() (
 	# If we need to start immediately, do it, so that the container
 	# is ready to be entered.
 	if [ -n "${start_now}" ] && [ "${start_now}" -eq 1 ]; then
-		"${distrobox_path}"/distrobox enter "${name}" -- touch /dev/null
+		# shellcheck disable=SC2086,2248
+		"${distrobox_path}"/distrobox enter ${root_flag} "${name}" -- touch /dev/null
 	fi
 
 	# if there are exported bins and apps declared, let's export them
 	if [ -n "${exported_apps}" ] || [ -n "${exported_bins}" ]; then
 		# First we start the container
-		"${distrobox_path}"/distrobox enter "${name}" -- touch /dev/null
+		# shellcheck disable=SC2086,2248
+		"${distrobox_path}"/distrobox enter ${root_flag} "${name}" -- touch /dev/null
 
-		IFS=" "
-		for app in ${exported_apps}; do
-			"${distrobox_path}"/distrobox enter "${name}" -- distrobox-export --app "${app}"
+		IFS="¤"
+		for apps in ${exported_apps}; do
+			# Split the string by spaces
+			IFS=" "
+			for app in ${apps}; do
+				# Export the app
+				# shellcheck disable=SC2086,2248
+				"${distrobox_path}"/distrobox enter ${root_flag} "${name}" -- distrobox-export --app "${app}"
+			done
 		done
 
-		IFS=" "
-		for bin in ${exported_bins}; do
-			"${distrobox_path}"/distrobox enter "${name}" -- distrobox-export --bin "${bin}" --export-path "${exported_bins_path}"
+		IFS="¤"
+		for bins in ${exported_bins}; do
+			# Split the string by spaces
+			IFS=" "
+			for bin in ${bins}; do
+				# Export the bin
+				# shellcheck disable=SC2086,2248
+				"${distrobox_path}"/distrobox enter ${root_flag} "${name}" -- distrobox-export --bin "${bin}" --export-path "${exported_bins_path}"
+			done
 		done
 	fi
-)
+}
 
-# Sanitize an input, add single/double quotes and escapes
+# encode_variable will encode an input in base64, removing surrounding single/double quotes.
 # Arguments:
-#   a value string
+#   variable: string
+# Expected global variables:
+#   None
+# Expected env variables:
+#   None
+# Outputs:
+#   a value string encoded in base64
+encode_variable()
+{
+	variable="${1}"
+	# remove surrounding quotes possibly added by the user
+	if echo "${variable}" | grep -qE '^"'; then
+		variable="$(echo "${variable}" | sed -e 's/^"//' -e 's/"$//')"
+	elif echo "${variable}" | grep -qE "^'"; then
+		variable="$(echo "${variable}" | sed -e "s/^'//" -e "s/'$//")"
+	fi
+
+	echo "${variable}" | base64 -w 0
+}
+
+# sanitize_variable will sanitize an input, add single/double quotes and escapes
+# Arguments:
+#   variable: string
+# Expected global variables:
+#   None
+# Expected env variables:
+#   None
 # Outputs:
 #   a value string sanitized
-sanitize_variable() (
+sanitize_variable()
+{
 	variable="${1}"
 
 	# If there are spaces but no quotes, let's add them
 	if echo "${variable}" | grep -q " " &&
 		! echo "${variable}" | grep -Eq "^'|^\""; then
 
-		variable="\"${variable}\""
+		# if we have double quotes we should wrap the whole line in single quotes
+		# in order to not "undo" them
+		if echo "${variable}" | grep -q '"'; then
+			variable="'${variable}'"
+		else
+			variable="\"${variable}\""
+		fi
 	fi
 
 	# Return
 	echo "${variable}"
-)
+}
 
-# Parse input file and call distrobox-create accordingly
+# parse_file will read and parse input file and call distrobox-create accordingly
 # Arguments:
-#   path of the manifest file to parse
+#   file: string path of the manifest file to parse
+# Expected global variables:
+#   tmpfile: string name of the tmpfile to read
+# Expected env variables:
+#   None
 # Outputs:
 #   None
-parse_file() (
+parse_file()
+{
 	file="${1}"
 	name=""
 
@@ -404,11 +576,6 @@ parse_file() (
 	'
 	# shellcheck disable=SC2013
 	for line in $(cat "${file}"); do
-		if [ -z "${line}" ]; then
-			# blank line, skip
-			continue
-		fi
-
 		# Remove comments and trailing spaces
 		line="$(echo "${line}" |
 			sed 's/\t/ /g' |
@@ -416,6 +583,11 @@ parse_file() (
 			sed 's/].*#.*//g' |
 			sed 's/ #.*//g' |
 			sed 's/\s*$//g')"
+
+		if [ -z "${line}" ]; then
+			# blank line, skip
+			continue
+		fi
 
 		# Detect start of new section
 		if [ "$(echo "${line}" | cut -c 1)" = '[' ]; then
@@ -440,20 +612,29 @@ parse_file() (
 		[ "${value}" = "false" ] && value=0
 
 		# Sanitize value, by whitespaces, quotes and escapes
-		value="$(sanitize_variable "${value}")"
+		if [ "${key}" = "init_hooks" ] || [ "${key}" = "pre_init_hooks" ]; then
+			# in case of shell commands (so the hooks) we prefer to pass the variable
+			# around encoded, so that we don't accidentally execute stuff
+			# and, we will execute sanitize_variable on the final string flag at the
+			# end, instead of key/value base.
+			value="$(encode_variable "${value}")"
+		else
+			value="$(sanitize_variable "${value}")"
+		fi
 
 		# Save options to tempfile, to source it later
 		touch "${tmpfile}"
 		if [ -n "${key}" ] && [ -n "${value}" ]; then
-			if grep -q "${key}=" "${tmpfile}"; then
-				value="$(echo "${value}" | sed "s|\"|\" \${${key}}¤|")"
+			if grep -q "^${key}=" "${tmpfile}"; then
+				# make keys cumulative
+				value="\${${key}}¤${value}"
 			fi
 			echo "${key}=${value}" >> "${tmpfile}"
 		fi
 	done
-	#	# Execute now one last time for the last block
+	# Execute now one last time for the last block
 	run_distrobox "${name}"
-)
+}
 
 # Exec
 parse_file "${input_file}"

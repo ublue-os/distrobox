@@ -3,15 +3,14 @@
 # Distrobox
 
 <sub>previous logo credits [j4ckr3d](https://github.com/j4ckr3d)  
-current logo credits [David Lapshin](https://github.com/daudix-UFO)<sub>
+current logo credits [David Lapshin](https://github.com/daudix)<sub>
 
-![Lint](https://github.com/89luca89/distrobox/actions/workflows/main.yml/badge.svg)
+[![Lint](https://github.com/89luca89/distrobox/actions/workflows/main.yml/badge.svg)](https://github.com/89luca89/distrobox/actions/workflows/main.yml)
 [![CI](https://github.com/89luca89/distrobox/actions/workflows/compatibility.yml/badge.svg)](https://github.com/89luca89/distrobox/actions/workflows/compatibility.yml)
 [![GitHub](https://img.shields.io/github/license/89luca89/distrobox?color=blue)](../COPYING.md)
 [![GitHub release (latest by date)](https://img.shields.io/github/v/release/89luca89/distrobox)](https://github.com/89luca89/distrobox/releases/latest)
 [![Packaging status](https://repology.org/badge/tiny-repos/distrobox.svg)](https://repology.org/project/distrobox/versions)
-[![Github issue needs help](https://img.shields.io/github/issues-raw/89luca89/distrobox/help%20wanted?color=blue&label=Help%20Wanted%20Issues)](https://github.com/89luca89/distrobox/issues?q=is%3Aissue+is%3Aopen+label%3A%22help+wanted%22)
-[![GitHub issues by-label](https://img.shields.io/github/issues-raw/89luca89/distrobox/bug?color=red&label=Open%20Bug%20Reports)](https://github.com/89luca89/distrobox/issues?q=is%3Aissue+is%3Aopen+label%3A%22bug%22)
+[![GitHub issues by-label](https://img.shields.io/github/issues-search/89luca89/distrobox?query=is%3Aissue%20is%3Aopen%20label%3Abug%20-label%3Await-on-user%20&label=Open%20Bug%20Reports&color=red)](https://github.com/89luca89/distrobox/issues?q=is%3Aissue+is%3Aopen+label%3Abug+-label%3Await-on-user)
 
 Use any Linux distribution inside your terminal. Enable both backward and forward
 compatibility with software and freedom to use whatever distribution you’re more
@@ -34,6 +33,10 @@ graphical apps (X11/Wayland), and audio.
 ![overview](https://user-images.githubusercontent.com/598882/144294862-f6684334-ccf4-4e5e-85f8-1d66210a0fff.png)
 
 ---
+
+> [!WARNING]  
+> Documentation on GitHub strictly refers to the code in the main branch. For the official documentation
+> Head over [https://distrobox.it](https://distrobox.it)
 
 - [Distrobox](#distrobox)
   - [What it does](#what-it-does)
@@ -141,7 +144,7 @@ graphical apps (X11/Wayland), and audio.
 
 ## What it does
 
-Simply put it's a fancy wrapper around `podman`, `docker` or `lilipod` to create and start
+Simply put it's a fancy wrapper around `podman`, `docker`, or `lilipod` to create and start
 containers highly integrated with the hosts.
 
 The distrobox environment is based on an OCI image.
@@ -189,25 +192,25 @@ Fedora Silverblue for the [uBlue](https://github.com/ublue-os) project
 
 ## Why
 
-- Provide a mutable environment on an immutable OS, like [Endless OS,
-  Fedora Silverblue, OpenSUSE MicroOS, ChromeOS](compatibility.md#host-distros)  or [SteamOS3](posts/steamdeck_guide.md)
+- Provide a mutable environment on an immutable OS, like [ChromeOS, Endless OS,
+  Fedora Silverblue, OpenSUSE Aeon/Kalpa, Vanilla OS](compatibility.md#host-distros), or [SteamOS3](posts/steamdeck_guide.md)
 - Provide a locally privileged environment for sudoless setups
   (eg. company-provided laptops, security reasons, etc...)
 - To mix and match a stable base system (eg. Debian Stable, Ubuntu LTS, RedHat)
   with a bleeding-edge environment for development or gaming
-  (eg. Arch, OpenSUSE Tumbleweed or Fedora with latest Mesa)
-- Leverage high abundance of curated distro images for docker/podman to
-  manage multiple environments
+  (eg. Arch, OpenSUSE Tumbleweed, or Fedora with the latest Mesa)
+- Leverage a high abundance of curated distro images for `docker`/`podman` to
+  manage multiple environments.
 
-Refer to the compatibility list for an overview of supported host's distro
+Refer to the compatibility list for an overview of the supported host distros
 [HERE](compatibility.md#host-distros) and container's distro [HERE](compatibility.md#containers-distros).
 
 ### Aims
 
 This project aims to bring **any distro userland to any other distro**
-supporting podman, docker or lilipod.
-It has been written in POSIX sh to be as portable as possible and not have
-problems with dependencies and glibc version's compatibility.
+supporting `podman`, `docker`, or `lilipod`.
+It has been written in POSIX shell to be as portable as possible and it does not have
+problems with dependencies and `glibc` version's compatibility.
 
 Refer [HERE](compatibility.md#supported-container-managers) for a list of
 supported container managers and minimum supported versions.
@@ -227,19 +230,19 @@ Benchmark 1: distrobox enter bench -- whoami
 
 #### Security implications
 
-Isolation and sandboxing is **not** the main aim of the project, on the contrary
+Isolation and sandboxing are **not** the main aims of the project, on the contrary
 it aims to tightly integrate the container with the host.
-The container will have complete access to your home, pen drives and so on,
+The container will have complete access to your home, pen drive, and so on,
 so do not expect it to be highly sandboxed like a plain
-docker/podman container or a flatpak.
+`docker`/`podman` container or a Flatpak.
 
-⚠️ **BE CAREFUL**:⚠️  if you use docker, or you use podman/lilipod with the `--root/-r` flag,
+⚠️ **BE CAREFUL**:⚠️  if you use `docker`, or you use `podman`/`lilipod` with the `--root/-r` flag,
 the containers will run as root, so **root inside the rootful container can modify
 system stuff outside the container**,
-Be also aware that **In rootful mode, you'll be asked to setup user's password**, this will
+Be also aware that **In rootful mode, you'll be asked to setup the user's password**, this will
 ensure at least that the container is not a passwordless gate to root,
-but if you have security concern for this, **use podman or lilipod that runs in rootless mode**.
-Rootless docker is still not working as intended and will be included in the future
+but if you have security concerns for this, **use `podman` or `lilipod` that runs in rootless mode**.
+Rootless `docker` is still not working as intended and will be included in the future
 when it will be complete.
 
 That said, it is in the works to implement some sort of decoupling with the host,
@@ -255,14 +258,14 @@ as discussed here: [#28 Sandboxed mode](https://github.com/89luca89/distrobox/is
 
 **Create a new distrobox with Systemd (acts similar to an LXC):**
 
-`distrobox create --name test --init --image debian:latest --additional-packages "systemd libpam-systemd"`
+`distrobox create --name test --init --image debian:latest --additional-packages "systemd libpam-systemd pipewire-audio-client-libraries"`
 
 **Enter created distrobox:**
 
 `distrobox enter test`
 
 **Add one with a [different distribution](https://github.com/89luca89/distrobox/blob/main/docs/compatibility.md#host-distros),
-eg Ubuntu 20.04:**
+eg. Ubuntu 20.04:**
 
 `distrobox create -i ubuntu:20.04`
 
@@ -325,7 +328,7 @@ skip_workdir="0"
 PATH="$PATH:/path/to/custom/podman"
 ```
 
-Alternatively it is possible to specify preferences using ENV variables:
+Alternatively, it is possible to specify preferences using ENV variables:
 
 - DBX_CONTAINER_ALWAYS_PULL
 - DBX_CONTAINER_CUSTOM_HOME
@@ -351,7 +354,7 @@ Thanks to the maintainers for their work: [M0Rf30](https://github.com/M0Rf30),
 
 ## Alternative methods
 
-Here is a list of alternative ways to install distrobox
+Here is a list of alternative ways to install `distrobox`.
 
 ### Curl or Wget
 
@@ -360,7 +363,11 @@ you can trust me and simply run this in your terminal:
 
 ```sh
 curl -s https://raw.githubusercontent.com/89luca89/distrobox/main/install | sudo sh
-# or using wget
+```
+
+or using wget
+
+```sh
 wget -qO- https://raw.githubusercontent.com/89luca89/distrobox/main/install | sudo sh
 ```
 
@@ -368,15 +375,23 @@ or if you want to select a custom directory to install without sudo:
 
 ```sh
 curl -s https://raw.githubusercontent.com/89luca89/distrobox/main/install | sh -s -- --prefix ~/.local
-# or using wget
+```
+
+or using wget
+
+```sh
 wget -qO- https://raw.githubusercontent.com/89luca89/distrobox/main/install | sh -s -- --prefix ~/.local
 ```
 
-If you want to install the last development version, directly from last commit on git, you can use:
+If you want to install the last development version, directly from the last commit on Git, you can use:
 
 ```sh
 curl -s https://raw.githubusercontent.com/89luca89/distrobox/main/install | sudo sh -s -- --next
-# or using wget
+```
+
+or using wget
+
+```sh
 wget -qO- https://raw.githubusercontent.com/89luca89/distrobox/main/install | sudo sh -s -- --next
 ```
 
@@ -384,16 +399,24 @@ or:
 
 ```sh
 curl -s https://raw.githubusercontent.com/89luca89/distrobox/main/install | sh -s -- --next --prefix ~/.local
-# or using wget
+```
+
+or using wget
+
+```sh
 wget -qO- https://raw.githubusercontent.com/89luca89/distrobox/main/install | sh -s -- --next --prefix ~/.local
 ```
 
-> **Warning**
+### Upgrading
+
+Just run the `curl` or `wget` command again.
+
+> [!WARNING]
 > Remember to add prefix-path-you-choose/bin to your PATH, to make it work.
 
 ### Git
 
-Alternatively you can clone the project using `git clone` or using the latest
+Alternatively, you can clone the project using `git clone` or using the latest
 release [HERE](https://github.com/89luca89/distrobox/releases/latest).
 
 Enter the directory and run `./install`, by default it will attempt to install
@@ -412,7 +435,7 @@ distro-specific instructions.
 ## Dependencies
 
 Distrobox depends on a container manager to work, you can choose to install
-either podman, docker or [lilipod](https://github.com/89luca89/lilipod).
+either `podman`, `docker` or [`lilipod`](https://github.com/89luca89/lilipod).
 
 Please look in the [Compatibility Table](compatibility.md#host-distros) for your
 distribution notes.
@@ -426,7 +449,7 @@ This should play well with completely sudoless setups and with devices like the 
 
 ## Uninstallation
 
-If you installed distrobox using the `install` script in the default install
+If you installed `distrobox` using the `install` script in the default install
 directory use this:
 
 ```sh
@@ -448,7 +471,7 @@ you can specify another directory if needed with `./uninstall --prefix ~/.local`
 
 ---
 
-![distro-box](./assets/distro-box.png)
+![distro-box](./assets/distro-box.webp)
 
 <sub>This artwork uses [Cardboard Box](https://skfb.ly/6Wq6q) model by [J0Y](https://sketchfab.com/lloydrostek)
 licensed under [Creative Commons Attribution 4.0](http://creativecommons.org/licenses/by/4.0)  

@@ -26,6 +26,35 @@
 
 trap '[ "$?" -ne 0 ] && printf "Error: An error occurred\n"' EXIT
 
+# Redirect stderr to stdout as podman by default logs stderr as priority 3 journald errors.
+# Github issue: https://github.com/containers/podman/issues/20728
+exec 2>&1
+
+# We'll also bind mount READ-WRITE useful mountpoints to pass external drives and libvirt from
+# the host to the container
+HOST_MOUNTS="
+	/etc/host.conf
+	/etc/machine-id
+	/media
+	/mnt
+	/run/libvirt
+	/run/media
+	/run/netconfig/
+	/run/systemd/journal
+	/run/systemd/resolve/
+	/run/systemd/seats
+	/run/systemd/sessions
+	/run/systemd/users
+	/run/udev
+	/var/lib/libvirt
+	/var/mnt"
+
+# We'll also bind mount in READ-ONLY useful directories from the host
+HOST_MOUNTS_RO="
+	/etc/localtime
+	/var/lib/systemd/coredump
+	/var/log/journal"
+
 HOST_MOUNTS_RO_INIT="
 	/etc/localtime
 	/run/systemd/journal
@@ -45,13 +74,20 @@ pre_init_hook=""
 rootful=0
 upgrade=0
 verbose=0
-version="1.5.0.2"
-# Print usage to stdout.
+version="1.8.1.2"
+
+# show_help will print usage to stdout.
 # Arguments:
 #   None
+# Expected global variables:
+#   version: distrobox version
+# Expected env variables:
+#   USER
+#   HOME
 # Outputs:
 #   print usage with examples.
-show_help() {
+show_help()
+{
 	cat << EOF
 distrobox version: ${version}
 
@@ -203,37 +239,60 @@ if stat /run/host/etc/shadow > /dev/null &&
 	rootful=1
 fi
 
-# Print mount flags considered "locked".
+# Get host $LANG
+if [ -f "/run/host/etc/locale.conf" ]; then
+	HOST_LOCALE=$(grep -e '^LANG=' /run/host/etc/locale.conf | sed 's/LANG=//' | sed 's/"//g' | sed "s/'//g")
+	HOST_LOCALE_ENCODING=$(echo "${HOST_LOCALE}" | sed -n 's/^[^.]*\.\(.*\)$/\1/p')
+	HOST_LOCALE_LANG=$(echo "${HOST_LOCALE}" | sed -n 's/^\([^.]*\)\..*$/\1/p')
+elif [ -f "/run/host/etc/default/locale" ]; then
+	HOST_LOCALE=$(grep -e '^LANG=' /run/host/etc/default/locale | sed 's/LANG=//' | sed 's/"//g')
+	HOST_LOCALE_ENCODING=$(echo "${HOST_LOCALE}" | sed -n 's/^[^.]*\.\(.*\)$/\1/p')
+	HOST_LOCALE_LANG=$(echo "${HOST_LOCALE}" | sed -n 's/^\([^.]*\)\..*$/\1/p')
+fi
+# Add fallback values in case host's locale is not set correctly
+if [ -z "${HOST_LOCALE:-}" ] || [ "${HOST_LOCALE:-}" = "C.UTF-8" ]; then
+	HOST_LOCALE="en_US.UTF-8"
+	HOST_LOCALE_ENCODING="UTF-8"
+	HOST_LOCALE_LANG="en_US"
+fi
+
+# get_locked_mount_flags will print mount flags considered "locked".
 # Arguments:
-# 	source_dir
+# 	src: path to the file/directory
+# Expected env variables:
+#	None
+# Expected global variables:
+#	None
 # Outputs:
 # 	Comma-separated list of locked mount flags
-get_locked_mount_flags() (
-	source_dir="$1"
-	prev_dir=""
+get_locked_mount_flags()
+{
+	src="$1"
+	prev=""
 	locked_flags=""
 
-	if [ ! -d "${source_dir}" ]; then
+	# If findmnt does not exist, exit
+	if ! command -v findmnt 2> /dev/null > /dev/null; then
 		return 0
 	fi
 
-	# If we can't read the directory, exit
-	if ! ls "${source_dir}" 2> /dev/null > /dev/null; then
+	# If we can't read the file/directory, exit
+	if ! ls "${src}" 2> /dev/null > /dev/null; then
 		return 0
 	fi
 
-	# Get mount flags of given directory, using nearest mountpoint.
+	# Get mount flags of given file/directory, using nearest mountpoint.
 	# Earlier versions of findmnt did not check parents until it found a mountpoint,
 	# so we use a workaround with dirname.
 	while true; do
-		flags="$(findmnt --noheadings --output OPTIONS --target "${source_dir}" || :)"
+		flags="$(findmnt --noheadings --output OPTIONS --target "${src}" || :)"
 		# shellcheck disable=SC2181
 		if [ -n "${flags}" ]; then
 			break
 		fi
-		prev_dir="${source_dir}"
-		source_dir="$(dirname "${source_dir}")"
-		[ "${source_dir}" = "${prev_dir}" ] && return 1
+		prev="${src}"
+		src="$(dirname "${src}")"
+		[ "${src}" = "${prev}" ] && return 1
 	done
 
 	for flag in nodev noexec nosuid; do
@@ -244,7 +303,7 @@ get_locked_mount_flags() (
 	done
 
 	printf "%s" "${locked_flags}"
-)
+}
 
 # init_readlink is a simplistic implementation for
 # readlink -fm
@@ -252,22 +311,32 @@ get_locked_mount_flags() (
 # busybox systems, and we need the path even for broken links.
 # Arguments:
 #	source file
+# Expected env variables:
+#	None
+# Expected global variables:
+#	None
 # Outputs:
 #	original path the link is pointing
-init_readlink() {
+init_readlink()
+{
 	# shellcheck disable=SC2010
 	ls -l "${1}" | grep -Eo '\->.*' | cut -d' ' -f2- | sed 's|\.\./|/|g'
 }
 
-# Bind mount or error.
+# mount_bind will perform a bind mount for inputs or error
 # Arguments:
-#   source_dir
-#	target_dir
-#	mount_flags -> optional
+#   source_dir: string what to mount
+#	target_dir: string where to mount
+#	mount_flags: list of mount flags -> optional
+# Expected env variables:
+#	None
+# Expected global variables:
+#	None
 # Outputs:
 #   No output if all ok
 #	Error if not
-mount_bind() (
+mount_bind()
+{
 	source_dir="$1"
 	target_dir="$2"
 	mount_flags=""
@@ -319,17 +388,23 @@ mount_bind() (
 	fi
 
 	# Add mountflags if needed, if no are specified, use rslave as default.
-	if [ "${mount_flags}" = "" ]; then
-		mount_flags="rslave"
-	fi
 	# bind mount source_dir to target_dir, return error if not successful
-	if ! mount --rbind -o "${mount_flags}" "${source_dir}" "${target_dir}"; then
-		printf "Warning: failed to bind mount %s to %s\n" "${source_dir}" "${target_dir}"
+	if [ "${mount_flags}" = "" ]; then
+		if ! mount --rbind "${source_dir}" "${target_dir}"; then
+			printf "Warning: failed to bind mount %s to %s\n" "${source_dir}" "${target_dir}"
+			return 1
+		fi
+		if ! mount --make-rslave "${target_dir}"; then
+			printf "Warning: failed to make rslave to %s\n" "${target_dir}"
+			return 1
+		fi
+	elif ! mount --rbind -o "${mount_flags}" "${source_dir}" "${target_dir}"; then
+		printf "Warning: failed to bind mount %s to %s using option %s\n" "${source_dir}" "${target_dir}" "${mount_flags}"
 		return 1
 	fi
 
 	return 0
-)
+}
 
 if [ -n "${pre_init_hook}" ]; then
 	printf "distrobox: Executing pre-init hooks...\n"
@@ -348,6 +423,1187 @@ shell_pkg="$(basename "${SHELL:-"bash"}")"
 if [ "${shell_pkg}" = "ash" ]; then
 	shell_pkg="bash"
 fi
+
+# setup_pkg_manager_hooks will create umount/remount hooks script for a package
+# manager. Mainly used by apt and pacman.
+# Arguments:
+#   None
+# Expected global variables:
+#   init: if this is an initful container
+#   HOST_MOUNTS_RO_INIT: list of mountpoints of an initful system, to avoid
+# Expected env variables:
+#   None
+# Outputs:
+#   None
+setup_pkg_manager_hooks()
+{
+	if {
+		[ -d "/etc/dpkg/dpkg.cfg.d/" ] || [ -d "/usr/share/libalpm/scripts" ]
+	} && [ "${init}" -eq 0 ]; then
+		cat << EOF > /etc/distrobox-pre-hook.sh
+#!/bin/sh
+mounts="${HOST_MOUNTS_RO_INIT}"
+for mount in \$mounts; do
+	if findmnt \$mount >/dev/null; then
+		umount -l \$mount
+	fi
+done
+EOF
+		cat << EOF > /etc/distrobox-post-hook.sh
+#!/bin/sh
+mounts="${HOST_MOUNTS_RO_INIT}"
+for mount in \$mounts; do
+	if [ -e /run/host/\$mount ] || [ -e /run/host/\$(readlink -fm /run/host/\$mount) ]; then
+		if [ ! -d /run/host/\$mount ]; then
+			rm -f \$mount && touch \$mount
+		fi
+		if ! mount --rbind \$(readlink -fm /run/host/\$mount) \$mount; then
+			mount --rbind /run/host/\$(readlink -fm /run/host/\$mount) \$mount
+		fi
+	fi
+done
+EOF
+		chmod +x /etc/distrobox-pre-hook.sh /etc/distrobox-post-hook.sh
+	fi
+}
+
+# setup_deb_exceptions will create path-excludes for host mounts, dpkg/apt only.
+# Arguments:
+#   None
+# Expected global variables:
+#   init: if this is an initful container
+#   HOST_MOUNTS_RO: list of readonly mountpoints, to avoid
+#   HOST_MOUNTS: list of readwrite mountpoints, to avoid
+# Expected env variables:
+#   None
+# Outputs:
+#   None
+setup_deb_exceptions()
+{
+	setup_pkg_manager_hooks
+
+	# In case of an DEB distro, we can specify that our bind_mount directories
+	# have to be ignored. This prevents conflicts during package installations.
+	if [ "${init}" -eq 0 ]; then
+		# Loop through all the environment vars
+		# and export them to the container.
+		mkdir -p /etc/dpkg/dpkg.cfg.d/
+		printf "" > /etc/dpkg/dpkg.cfg.d/00_distrobox
+		for net_mount in ${HOST_MOUNTS_RO} ${HOST_MOUNTS}; do
+			printf "path-exclude %s/*\n" "${net_mount}" >> /etc/dpkg/dpkg.cfg.d/00_distrobox
+		done
+
+		# Also we put a hook to clear some critical paths that do not play well
+		# with read only filesystems, like Systemd.
+		if [ -d "/etc/apt/apt.conf.d/" ]; then
+			printf 'DPkg::Pre-Invoke {/etc/distrobox-pre-hook.sh};\n' > /etc/apt/apt.conf.d/00_distrobox
+			printf 'DPkg::Post-Invoke {/etc/distrobox-post-hook.sh};\n' >> /etc/apt/apt.conf.d/00_distrobox
+		fi
+	fi
+}
+
+# setup_pacman_exceptions will set pre/post transaction hooks to avoid host's mounts, pacman only.
+# Arguments:
+#   None
+# Expected global variables:
+#   init: if this is an initful container
+# Expected env variables:
+#   None
+# Outputs:
+#   None
+setup_pacman_exceptions()
+{
+	setup_pkg_manager_hooks
+
+	# Workarounds for pacman. We need to exclude the paths by using a pre-hook to umount them and a
+	# post-hook to remount them. Additionally we neutralize the systemd-post-hooks as they do not
+	# work on a rootless container system.
+	if [ -d "/usr/share/libalpm/scripts" ] && [ "${init}" -eq 0 ]; then
+		# in case we're not using an init image, neutralize systemd post installation hooks
+		# so that we do not encounter problems along the way.
+		# This will be removed if we're using --init.
+		cat << EOF > /usr/share/libalpm/scripts/distrobox_post_hook.sh
+#!/bin/sh
+echo -e '#!/bin/sh\nexit 0' > /usr/share/libalpm/scripts/systemd-hook;
+EOF
+		chmod +x /usr/share/libalpm/scripts/distrobox_post_hook.sh
+
+		# create hooks files for them
+		find /usr/share/libalpm/hooks/*distrobox* -delete || :
+		for hook in /etc/distrobox-pre-hook.sh /etc/distrobox-post-hook.sh /usr/share/libalpm/scripts/distrobox_post_hook.sh; do
+			when="PostTransaction"
+			[ -z "${hook##*pre*}" ] && when="PreTransaction"
+			cat << EOF > "/usr/share/libalpm/hooks/$(basename "${hook}").hook"
+[Trigger]
+Operation = Install
+Operation = Upgrade
+Type = Package
+Target = *
+[Action]
+Description = Distrobox hook ${hook}...
+When = ${when}
+Exec = ${hook}
+EOF
+		done
+	fi
+
+}
+
+# setup_rpm_exceptions will create path-excludes for host mounts, rpm only (dnf, yum, zypper, microdnf).
+# Arguments:
+#   None
+# Expected global variables:
+#   init: if this is an initful container
+#   HOST_MOUNTS_RO: list of readonly mountpoints, to avoid
+#   HOST_MOUNTS: list of readwrite mountpoints, to avoid
+# Expected env variables:
+#   None
+# Outputs:
+#   None
+setup_rpm_exceptions()
+{
+	# In case of an RPM distro, we can specify that our bind_mount directories
+	# are in fact net shares. This prevents conflicts during package installations.
+	if [ "${init}" -eq 0 ]; then
+		mkdir -p /usr/lib/rpm/macros.d/
+		# Loop through all the environment vars
+		# and export them to the container.
+		net_mounts=""
+		for net_mount in \
+			${HOST_MOUNTS_RO} ${HOST_MOUNTS} \
+			'/dev' '/proc' '/sys' '/tmp' \
+			'/etc/hosts' '/etc/resolv.conf' '/etc/passwd' '/etc/shadow'; do
+
+			net_mounts="${net_mount}:${net_mounts}"
+		done
+		net_mounts=${net_mounts%?}
+		cat << EOF > /usr/lib/rpm/macros.d/macros.distrobox
+%_netsharedpath ${net_mounts}
+EOF
+	fi
+}
+
+# setup_xbps_exceptions will create path-excludes for host mounts, xbps only.
+# Arguments:
+#   None
+# Expected global variables:
+#   None
+# Expected env variables:
+#   None
+# Outputs:
+#   None
+setup_xbps_exceptions()
+{
+	# We have to lock this paths from xbps extraction, as it's incompatible with distrobox's
+	# mount process.
+	cat << EOF > /etc/xbps.d/distrobox-ignore.conf
+noextract=/etc/passwd
+noextract=/etc/hosts
+noextract=/etc/host.conf
+noextract=/etc/hostname
+noextract=/etc/localtime
+noextract=/etc/machine-id
+noextract=/etc/resolv.conf
+EOF
+}
+
+# setup_apk will upgrade or setup all packages for apk based systems.
+# Arguments:
+#   None
+# Expected global variables:
+#   upgrade: if we need to upgrade or not
+#   container_additional_packages: additional packages to install during this phase
+# Expected env variables:
+#   None
+# Outputs:
+#   None
+setup_apk()
+{
+	# If we need to upgrade, do it and exit, no further action required.
+	if [ "${upgrade}" -ne 0 ]; then
+		apk update
+		apk upgrade
+		exit
+	fi
+	# Check if shell_pkg is available in distro's repo. If not we
+	# fall back to bash, and we set the SHELL variable to bash so
+	# that it is set up correctly for the user.
+	if ! apk add "${shell_pkg}"; then
+		shell_pkg="bash"
+	fi
+	if apk add wolfi-base; then
+		deps="
+			busybox
+			gnutar
+			man-db
+			mesa
+			openssh-client
+			posix-libc-utils
+		"
+	elif apk add alpine-base; then
+		deps="
+			bash-completion
+			docs
+			gcompat
+			libc-utils
+			lsof
+			man-pages
+			mandoc
+			musl-utils
+			openssh-client-default
+			pinentry
+			tar
+			vte3
+			which
+			$(apk search -q mesa-dri)
+			$(apk search -q mesa-vulkan)
+		"
+	fi
+	deps="${deps:-}
+		${shell_pkg}
+		bash
+		bc
+		bzip2
+		coreutils
+		curl
+		diffutils
+		findmnt
+		findutils
+		gnupg
+		gpg
+		iproute2
+		iputils
+		keyutils
+		less
+		libcap
+		mount
+		ncurses
+		ncurses-terminfo
+		net-tools
+		pigz
+		rsync
+		shadow
+		sudo
+		tcpdump
+		tree
+		tzdata
+		umount
+		unzip
+		util-linux
+		util-linux-login
+		util-linux-misc
+		vulkan-loader
+		wget
+		xauth
+		xz
+		zip
+		$(apk search -qe procps)
+	"
+	# shellcheck disable=SC2086
+	found_deps="$(apk search -qe ${deps} | tr '\n' ' ')"
+	install_pkg=""
+	for dep in ${deps}; do
+		# shellcheck disable=SC2249
+		case " ${found_deps} " in
+			*" ${dep} "*)
+				install_pkg="${install_pkg} ${dep}"
+				;;
+		esac
+	done
+	# shellcheck disable=SC2086
+	apk add --force-overwrite ${install_pkg}
+
+	# Ensure we have tzdata installed and populated, sometimes container
+	# images blank the zoneinfo directory, so we reinstall the package to
+	# ensure population
+	if [ ! -e /usr/share/zoneinfo/UTC ]; then
+		apk del tzdata
+		apk add tzdata
+	fi
+
+	# Install additional packages passed at distrbox-create time
+	if [ -n "${container_additional_packages}" ]; then
+		# shellcheck disable=SC2086
+		apk add --force-overwrite ${container_additional_packages}
+	fi
+}
+
+# setup_apt will upgrade or setup all packages for apt based systems.
+# Arguments:
+#   None
+# Expected global variables:
+#   upgrade: if we need to upgrade or not
+#   container_additional_packages: additional packages to install during this phase
+# Expected env variables:
+#   None
+# Outputs:
+#   None
+setup_apt()
+{
+	export DEBIAN_FRONTEND=noninteractive
+
+	# If we need to upgrade, do it and exit, no further action required.
+	if [ "${upgrade}" -ne 0 ]; then
+		apt-get update
+		apt-get upgrade -o Dpkg::Options::="--force-confold" -y
+		exit
+	fi
+	# In Ubuntu official images, dpkg is configured to ignore locale and docs
+	# This however, results in a rather poor out-of-the-box experience
+	# So, let's enable them.
+	rm -f /etc/dpkg/dpkg.cfg.d/excludes
+
+	apt-get update
+	# Check if shell_pkg is available in distro's repo. If not we
+	# fall back to bash, and we set the SHELL variable to bash so
+	# that it is set up correctly for the user.
+	if ! apt-get install -y "${shell_pkg}"; then
+		shell_pkg="bash"
+	fi
+	deps="
+		${shell_pkg}
+		apt-utils
+		bash-completion
+		bc
+		bzip2
+		curl
+		dialog
+		diffutils
+		findutils
+		gnupg
+		gnupg2
+		gpgsm
+		hostname
+		iproute2
+		iputils-ping
+		keyutils
+		language-pack-en
+		less
+		libcap2-bin
+		libkrb5-3
+		libnss-mdns
+		libnss-myhostname
+		libvte-2.9*-common
+		libvte-common
+		locales
+		lsof
+		man-db
+		manpages
+		mtr
+		ncurses-base
+		openssh-client
+		passwd
+		pigz
+		pinentry-curses
+		procps
+		rsync
+		sudo
+		tcpdump
+		time
+		traceroute
+		tree
+		tzdata
+		unzip
+		util-linux
+		wget
+		xauth
+		xz-utils
+		zip
+		libgl1
+		libegl-mesa0
+		libegl1-mesa
+		libgl1-mesa-glx
+		libegl1
+		libglx-mesa0
+		libvulkan1
+		mesa-vulkan-drivers
+	"
+	# shellcheck disable=SC2086,2046
+	apt-get install -y $(apt-cache show ${deps} 2> /dev/null | grep "Package:" | sort -u | cut -d' ' -f2-)
+
+	# In case the locale is not available, install it
+	# will ensure we don't fallback to C.UTF-8
+	if [ -e /etc/locale.gen ] && {
+		! locale -a | grep -qi en_us.utf8 || ! locale -a | grep -qi "$(echo "${HOST_LOCALE}" | tr -d '-')"
+	}; then
+		sed -i "s|#.*en_US.UTF-8|en_US.UTF-8|g" /etc/locale.gen
+		sed -i "s|#.*${HOST_LOCALE}|${HOST_LOCALE}|g" /etc/locale.gen
+		locale-gen
+		update-locale LC_ALL="${HOST_LOCALE}" LANG="${HOST_LOCALE}"
+		dpkg-reconfigure locales
+	fi
+
+	# Ensure we have tzdata installed and populated, sometimes container
+	# images blank the zoneinfo directory, so we reinstall the package to
+	# ensure population
+	if [ ! -e /usr/share/zoneinfo/UTC ]; then
+		apt-get --reinstall install tzdata
+	fi
+
+	# Install additional packages passed at distrbox-create time
+	if [ -n "${container_additional_packages}" ]; then
+		# shellcheck disable=SC2086
+		apt-get install -y ${container_additional_packages}
+	fi
+}
+
+# setup_dnf will upgrade or setup all packages for dnf/yum based systems.
+# Arguments:
+#   manager: yum or dnf
+# Expected global variables:
+#   upgrade: if we need to upgrade or not
+#   container_additional_packages: additional packages to install during this phase
+# Expected env variables:
+#   None
+# Outputs:
+#   None
+setup_dnf()
+{
+	manager=$1
+
+	# If we need to upgrade, do it and exit, no further action required.
+	if [ "${upgrade}" -ne 0 ]; then
+		${manager} upgrade -y
+		exit
+	fi
+	# In dnf family official images, dnf is configured to ignore locale and docs
+	# This however, results in a rather poor out-of-the-box experience
+	# So, let's enable them.
+	[ -e /etc/dnf/dnf.conf ] && sed -i '/tsflags=nodocs/d' /etc/dnf/dnf.conf
+	[ -e /etc/yum.conf ] && sed -i '/tsflags=nodocs/d' /etc/yum.conf
+
+	# Check if shell_pkg is available in distro's repo. If not we
+	# fall back to bash, and we set the SHELL variable to bash so
+	# that it is set up correctly for the user.
+	if ! ${manager} install -y "${shell_pkg}" 2> /dev/null; then
+		shell_pkg="bash"
+	fi
+	flags=""
+	if [ "${manager}" = "dnf" ]; then
+		flags="--allowerasing"
+	fi
+	deps="
+		${shell_pkg}
+		bash-completion
+		bc
+		bzip2
+		cracklib-dicts
+		curl
+		diffutils
+		dnf-plugins-core
+		findutils
+		glibc-all-langpacks
+		glibc-common
+		glibc-locale-source
+		gnupg2
+		gnupg2-smime
+		hostname
+		iproute
+		iputils
+		keyutils
+		krb5-libs
+		less
+		lsof
+		man-db
+		man-pages
+		mtr
+		ncurses
+		nss-mdns
+		openssh-clients
+		pam
+		passwd
+		pigz
+		pinentry
+		procps-ng
+		rsync
+		shadow-utils
+		sudo
+		tcpdump
+		time
+		traceroute
+		tree
+		tzdata
+		unzip
+		util-linux
+		vte-profile
+		wget
+		which
+		whois
+		words
+		xorg-x11-xauth
+		xz
+		zip
+		mesa-dri-drivers
+		mesa-vulkan-drivers
+		vulkan
+	"
+	# shellcheck disable=SC2086,2046,2248
+	${manager} install ${flags} -y $(${manager} list -q ${deps} |
+		grep -v "Packages" |
+		grep "$(uname -m)" |
+		cut -d' ' -f1)
+
+	# In case the locale is not available, install it
+	# will ensure we don't fallback to C.UTF-8
+	if [ ! -e /usr/share/i18n/charmaps ]; then
+		${manager} reinstall -y glibc-common
+	fi
+	if ! locale -a | grep -qi en_us.utf8 || ! locale -a | grep -qi "$(echo "${HOST_LOCALE}" | tr -d '-')"; then
+		LANG="${HOST_LOCALE}" localedef -i "${HOST_LOCALE_LANG}" -f "${HOST_LOCALE_ENCODING}" "${HOST_LOCALE}"
+	fi
+
+	# Ensure we have tzdata installed and populated, sometimes container
+	# images blank the zoneinfo directory, so we reinstall the package to
+	# ensure population
+	if [ ! -e /usr/share/zoneinfo/UTC ]; then
+		${manager} reinstall -y tzdata
+	fi
+
+	# Install additional packages passed at distrbox-create time
+	if [ -n "${container_additional_packages}" ]; then
+		# shellcheck disable=SC2086
+		${manager} install -y ${container_additional_packages}
+	fi
+}
+
+# setup_emerge will upgrade or setup all packages for gentoo based systems.
+# Arguments:
+#   None
+# Expected global variables:
+#   upgrade: if we need to upgrade or not
+#   container_additional_packages: additional packages to install during this phase
+# Expected env variables:
+#   None
+# Outputs:
+#   None
+setup_emerge()
+{
+	# Check if the container we are using has a ::gentoo repo defined,
+	# if it is defined and it is empty, then synchroznize it.
+	gentoo_repo="$(portageq get_repo_path / gentoo)"
+	if [ -n "${gentoo_repo}" ] && [ ! -e "${gentoo_repo}" ]; then
+		emerge-webrsync
+	fi
+	# If we need to upgrade, do it and exit, no further action required.
+	if [ "${upgrade}" -ne 0 ]; then
+		emerge --sync
+		exit
+	fi
+	# Check if shell_pkg is available in distro's repo. If not we
+	# fall back to bash, and we set the SHELL variable to bash so
+	# that it is set up correctly for the user.
+	if ! emerge --ask=n --autounmask-continue --noreplace --quiet-build "${shell_pkg}"; then
+		shell_pkg="bash"
+	fi
+	deps="
+		app-shells/${shell_pkg}
+		app-crypt/gnupg
+		app-shells/bash-completion
+		sys-apps/diffutils
+		sys-apps/findutils
+		sys-apps/less
+		sys-libs/ncurses
+		net-misc/curl
+		app-crypt/pinentry
+		sys-process/procps
+		sys-apps/shadow
+		app-admin/sudo
+		sys-devel/bc
+		sys-process/lsof
+		sys-apps/util-linux
+		net-misc/wget
+	"
+	install_pkg=""
+	for dep in ${deps}; do
+		if [ "$(emerge --ask=n --search "${dep}" | grep "Applications found" | grep -Eo "[0-9]")" -gt 0 ]; then
+			# shellcheck disable=SC2086
+			install_pkg="${install_pkg} ${dep}"
+		fi
+	done
+	# shellcheck disable=SC2086
+	emerge --ask=n --autounmask-continue --noreplace --quiet-build ${install_pkg}
+
+	# In case the locale is not available, install it
+	# will ensure we don't fallback to C.UTF-8
+	if ! locale -a | grep -qi en_us.utf8 || ! locale -a | grep -qi "$(echo "${HOST_LOCALE}" | tr -d '-')"; then
+		sed -i "s|#.*en_US.UTF-8|en_US.UTF-8|g" /etc/locale.gen
+		sed -i "s|#.*${HOST_LOCALE}|${HOST_LOCALE}|g" /etc/locale.gen
+		locale-gen
+		cat << EOF > /etc/env.d/02locale
+LANG=${HOST_LOCALE}
+LC_CTYPE=${HOST_LOCALE}
+EOF
+	fi
+
+	# Install additional packages passed at distrbox-create time
+	if [ -n "${container_additional_packages}" ]; then
+		# shellcheck disable=SC2086
+		emerge --ask=n --autounmask-continue --noreplace --quiet-build \
+			${container_additional_packages}
+	fi
+}
+
+# setup_microdnf will upgrade or setup all packages for microdnf based systems.
+# Arguments:
+#   None
+# Expected global variables:
+#   upgrade: if we need to upgrade or not
+#   container_additional_packages: additional packages to install during this phase
+# Expected env variables:
+#   None
+# Outputs:
+#   None
+setup_microdnf()
+{
+	# If we need to upgrade, do it and exit, no further action required.
+	if [ "${upgrade}" -ne 0 ]; then
+		microdnf upgrade -y
+		exit
+	fi
+	# Check if shell_pkg is available in distro's repo. If not we
+	# fall back to bash, and we set the SHELL variable to bash so
+	# that it is set up correctly for the user.
+	if ! microdnf install -y "${shell_pkg}"; then
+		shell_pkg="bash"
+	fi
+	deps="
+		${shell_pkg}
+		bash-completion
+		bc
+		bzip2
+		cracklib-dicts
+		diffutils
+		dnf-plugins-core
+		findutils
+		glibc-all-langpacks
+		glibc-common
+		glibc-locale-source
+		gnupg2
+		gnupg2-smime
+		hostname
+		iproute
+		iputils
+		keyutils
+		krb5-libs
+		less
+		lsof
+		man-db
+		man-pages
+		mtr
+		ncurses
+		nss-mdns
+		openssh-clients
+		pam
+		passwd
+		pigz
+		pinentry
+		procps-ng
+		rsync
+		shadow-utils
+		sudo
+		tcpdump
+		time
+		traceroute
+		tree
+		tzdata
+		unzip
+		util-linux
+		vte-profile
+		wget
+		which
+		whois
+		words
+		xorg-x11-xauth
+		xz
+		zip
+		mesa-dri-drivers
+		mesa-vulkan-drivers
+		vulkan
+	"
+	install_pkg=""
+	for dep in ${deps}; do
+		if [ "$(microdnf repoquery "${dep}" | wc -l)" -gt 0 ]; then
+			install_pkg="${install_pkg} ${dep}"
+		fi
+	done
+	# shellcheck disable=SC2086,SC2046
+	microdnf install -y ${install_pkg}
+
+	# In case the locale is not available, install it
+	# will ensure we don't fallback to C.UTF-8
+	if [ ! -e /usr/share/zoneinfo/UTC ]; then
+		microdnf reinstall -y tzdata || microdnf install -y glibc-common
+	fi
+	if ! locale -a | grep -qi en_us.utf8 || ! locale -a | grep -qi "$(echo "${HOST_LOCALE}" | tr -d '-')"; then
+		LANG="${HOST_LOCALE}" localedef -i "${HOST_LOCALE_LANG}" -f "${HOST_LOCALE_ENCODING}" "${HOST_LOCALE}"
+	fi
+
+	# Ensure we have tzdata installed and populated, sometimes container
+	# images blank the zoneinfo directory, so we reinstall the package to
+	# ensure population
+	if [ ! -e /usr/share/zoneinfo/UTC ]; then
+		microdnf reinstall -y tzdata || microdnf install -y tzdata
+	fi
+
+	# Install additional packages passed at distrbox-create time
+	if [ -n "${container_additional_packages}" ]; then
+		# shellcheck disable=SC2086
+		microdnf install -y ${container_additional_packages}
+	fi
+}
+
+# setup_pacman will upgrade or setup all packages for pacman based systems.
+# Arguments:
+#   None
+# Expected global variables:
+#   upgrade: if we need to upgrade or not
+#   container_additional_packages: additional packages to install during this phase
+# Expected env variables:
+#   None
+# Outputs:
+#   None
+setup_pacman()
+{
+	# Update the package repository cache exactly once before installing packages.
+	pacman -S -y -y
+
+	# If we need to upgrade, do it and exit, no further action required.
+	if [ "${upgrade}" -ne 0 ]; then
+		pacman -S -u --noconfirm
+		exit
+	fi
+	# In archlinux official images, pacman is configured to ignore locale and docs
+	# This however, results in a rather poor out-of-the-box experience
+	# So, let's enable them.
+	sed -i "s|NoExtract.*||g" /etc/pacman.conf
+	sed -i "s|NoProgressBar.*||g" /etc/pacman.conf
+
+	pacman -S -u --noconfirm
+	# Check if shell_pkg is available in distro's repo. If not we
+	# fall back to bash, and we set the SHELL variable to bash so
+	# that it is set up correctly for the user.
+	if ! pacman -S --needed --noconfirm "${shell_pkg}"; then
+		shell_pkg="bash"
+	fi
+	deps="
+		${shell_pkg}
+		bash-completion
+		bc
+		curl
+		diffutils
+		findutils
+		glibc
+		gnupg
+		iputils
+		inetutils
+		keyutils
+		less
+		lsof
+		man-db
+		man-pages
+		mlocate
+		mtr
+		ncurses
+		nss-mdns
+		openssh
+		pigz
+		pinentry
+		procps-ng
+		rsync
+		shadow
+		sudo
+		tcpdump
+		time
+		traceroute
+		tree
+		tzdata
+		unzip
+		util-linux
+		util-linux-libs
+		vte-common
+		wget
+		words
+		xorg-xauth
+		zip
+		mesa
+		vulkan-intel
+		vulkan-radeon
+	"
+	# shellcheck disable=SC2086,2046
+	pacman -S --needed --noconfirm $(pacman -Ssq | grep -E "^($(echo ${deps} | tr ' ' '|'))$")
+
+	if [ ! -e "/usr/share/i18n/locales${HOST_LOCALE}" ]; then
+		pacman -S --noconfirm glibc glibc-locales
+	fi
+
+	# Ensure we have tzdata installed and populated, sometimes container
+	# images blank the zoneinfo directory, so we reinstall the package to
+	# ensure population
+	if [ ! -e /usr/share/zoneinfo/UTC ]; then
+		pacman -S --noconfirm tzdata
+	fi
+
+	# In case the locale is not available, install it
+	# will ensure we don't fallback to C.UTF-8
+	if ! locale -a | grep -qi en_us.utf8 || ! locale -a | grep -qi "$(echo "${HOST_LOCALE}" | tr -d '-')"; then
+		sed -i "s|#.*en_US.UTF-8|en_US.UTF-8|g" /etc/locale.gen
+		sed -i "s|#.*${HOST_LOCALE}|${HOST_LOCALE}|g" /etc/locale.gen
+		locale-gen -a
+	fi
+
+	# Install additional packages passed at distrbox-create time
+	if [ -n "${container_additional_packages}" ]; then
+		# shellcheck disable=SC2086
+		pacman -S --needed --noconfirm ${container_additional_packages}
+	fi
+}
+
+# setup_slackpkg will upgrade or setup all packages for slackware based systems.
+# Arguments:
+#   None
+# Expected global variables:
+#   upgrade: if we need to upgrade or not
+#   container_additional_packages: additional packages to install during this phase
+# Expected env variables:
+#   None
+# Outputs:
+#   None
+setup_slackpkg()
+{
+	# If we need to upgrade, do it and exit, no further action required.
+	if [ "${upgrade}" -ne 0 ]; then
+		yes | slackpkg upgrade-all -default_answer=yes -batch=yes
+		exit
+	fi
+	slackpkg update
+	# Check if shell_pkg is available in distro's repo. If not we
+	# fall back to bash, and we set the SHELL variable to bash so
+	# that it is set up correctly for the user.
+	if ! yes | slackpkg install -default_answer=yes -batch=yes "${shell_pkg}"; then
+		shell_pkg="bash"
+	fi
+	deps="
+		${shell_pkg}
+		bash-completion
+		bc
+		curl
+		diffutils
+		findutils
+		glew
+		glibc
+		glu
+		gnupg2
+		iputils
+		less
+		libX11
+		libXau
+		libXdamage
+		libXdmcp
+		libXext
+		libXfixes
+		libXxf86vm
+		libdrm
+		libvte-2
+		libxcb
+		libxcb-dri2
+		libxcb-dri3
+		libxcb-glx
+		libxcb-present
+		libxcb-randr
+		libxcb-render
+		libxcb-shape
+		libxcb-sync
+		libxcb-xfixes
+		libxshmfence
+		lsof
+		man
+		mesa
+		ncurses
+		openssh
+		pinentry
+		procps
+		rsync
+		shadow
+		ssh
+		sudo
+		time
+		wget
+		xauth
+	"
+	install_pkg=""
+	dep=""
+	for dep in ${deps}; do
+		if ! slackpkg search "${dep}" | grep -q "No package name matches the pattern"; then
+			install_pkg="${install_pkg} ${dep}"
+		fi
+	done
+
+	rm -f /var/lock/slackpkg.*
+
+	# shellcheck disable=SC2086
+	yes | slackpkg install -default_answer=yes -batch=yes ${install_pkg}
+
+	# Install additional packages passed at distrbox-create time
+	if [ -n "${container_additional_packages}" ]; then
+		# shellcheck disable=SC2086
+		yes | slackpkg install -default_answer=yes -batch=yes \
+			${container_additional_packages}
+	fi
+}
+
+# setup_swupd will upgrade or setup all packages for clearlinux based systems.
+# Arguments:
+#   None
+# Expected global variables:
+#   upgrade: if we need to upgrade or not
+#   container_additional_packages: additional packages to install during this phase
+# Expected env variables:
+#   None
+# Outputs:
+#   None
+setup_swupd()
+{
+	# If we need to upgrade, do it and exit, no further action required.
+	if [ "${upgrade}" -ne 0 ]; then
+		swupd update
+		exit
+	fi
+
+	swupd bundle-add os-core-search
+
+	deps="
+		bc
+		cryptography
+		curl
+		network-basic
+		procps-ng
+		rsync
+		shells
+		sysadmin-basic
+		unzip
+		wget
+		x11-tools
+		zip
+		devpkg-Vulkan-Loader
+		lib-opengl
+	"
+	install_pkg=""
+	for dep in ${deps}; do
+		if swupd search "${dep}" > /dev/null; then
+			install_pkg="${install_pkg} ${dep}"
+		fi
+	done
+	# shellcheck disable=SC2086
+	swupd bundle-add ${install_pkg}
+
+	# Install additional packages passed at distrbox-create time
+	if [ -n "${container_additional_packages}" ]; then
+		# shellcheck disable=SC2086
+		swupd bundle-add ${container_additional_packages}
+	fi
+}
+
+# setup_xbps will upgrade or setup all packages for xbps based systems.
+# Arguments:
+#   None
+# Expected global variables:
+#   upgrade: if we need to upgrade or not
+#   container_additional_packages: additional packages to install during this phase
+# Expected env variables:
+#   None
+# Outputs:
+#   None
+setup_xbps()
+{
+	# If we need to upgrade, do it and exit, no further action required.
+	if [ "${upgrade}" -ne 0 ]; then
+		xbps-install -Syu
+		exit
+	fi
+	# Ensure we avoid errors by keeping xbps updated
+	xbps-install -Syu xbps
+
+	# Check if shell_pkg is available in distro's repo. If not we
+	# fall back to bash, and we set the SHELL variable to bash so
+	# that it is set up correctly for the user.
+	if ! xbps-install -Sy "${shell_pkg}"; then
+		shell_pkg="bash"
+	fi
+	deps="
+		${shell_pkg}
+		bash-completion
+		bc
+		bzip2
+		curl
+		diffutils
+		findutils
+		gnupg2
+		inetutils-ping
+		iproute2
+		less
+		lsof
+		man-db
+		mit-krb5-client
+		mit-krb5-libs
+		mtr
+		ncurses-base
+		nss
+		openssh
+		pigz
+		pinentry-tty
+		procps-ng
+		rsync
+		shadow
+		sudo
+		time
+		traceroute
+		tree
+		tzdata
+		unzip
+		util-linux
+		xauth
+		xz
+		zip
+		wget
+		vte3
+		mesa-dri
+		vulkan-loader
+		mesa-vulkan-intel
+		mesa-vulkan-radeon
+	"
+	# shellcheck disable=SC2086,2046
+	xbps-install -Sy $(xbps-query -Rs '*' | awk '{print $2}' | sed 's/-[^-]*$//' | grep -E "^($(echo ${deps} | tr ' ' '|'))$")
+
+	# In case the locale is not available, install it
+	# will ensure we don't fallback to C.UTF-8
+	if command -v locale && {
+		! locale -a | grep -qi en_us.utf8 || ! locale -a | grep -qi "$(echo "${HOST_LOCALE}" | tr -d '-')"
+	}; then
+		sed -i "s|#.*en_US.UTF-8|en_US.UTF-8|g" /etc/default/libc-locales
+		sed -i "s|#.*${HOST_LOCALE}|${HOST_LOCALE}|g" /etc/default/libc-locales
+		xbps-reconfigure --force glibc-locales
+	fi
+
+	# Ensure we have tzdata installed and populated, sometimes container
+	# images blank the zoneinfo directory, so we reinstall the package to
+	# ensure population
+	if [ ! -e /usr/share/zoneinfo/UTC ]; then
+		xbps-install --force -y tzdata
+	fi
+
+	# Install additional packages passed at distrbox-create time
+	if [ -n "${container_additional_packages}" ]; then
+		# shellcheck disable=SC2086
+		xbps-install -Sy ${container_additional_packages}
+	fi
+}
+
+# setup_zypper will upgrade or setup all packages for zypper based systems.
+# Arguments:
+#   None
+# Expected global variables:
+#   upgrade: if we need to upgrade or not
+#   container_additional_packages: additional packages to install during this phase
+# Expected env variables:
+#   None
+# Outputs:
+#   None
+setup_zypper()
+{
+	# If we need to upgrade, do it and exit, no further action required.
+	if [ "${upgrade}" -ne 0 ]; then
+		zypper dup -y
+		exit
+	fi
+	if ! zypper install -y "${shell_pkg}"; then
+		shell_pkg="bash"
+	fi
+
+	# In openSUSE official images, zypper is configured to ignore recommended
+	# packages (i.e., weak dependencies). This however, results in a rather
+	# poor out-of-the-box experience (e.g., when trying to run GUI apps).
+	# So, let's enable them. For the same reason, we make sure we install
+	# docs.
+	sed -i 's/.*solver.onlyRequires.*/solver.onlyRequires = false/g' /etc/zypp/zypp.conf
+	sed -i 's/.*rpm.install.excludedocs.*/rpm.install.excludedocs = no/g' /etc/zypp/zypp.conf
+	# With recommended packages, something might try to pull in
+	# parallel-printer-support which can't be installed in rootless containers.
+	# Since we very much likely never need it, just lock it
+	zypper al parallel-printer-support
+	# Check if shell_pkg is available in distro's repo. If not we
+	# fall back to bash, and we set the SHELL variable to bash so
+	# that it is set up correctly for the user.
+	deps="
+		${shell_pkg}
+		bash-completion
+		bc
+		bzip2
+		curl
+		diffutils
+		findutils
+		glibc-locale
+		glibc-locale-base
+		gnupg
+		hostname
+		iputils
+		keyutils
+		less
+		libvte-2*
+		lsof
+		man
+		man-pages
+		mtr
+		ncurses
+		nss-mdns
+		openssh-clients
+		pam
+		pam-extra
+		pigz
+		pinentry
+		procps
+		rsync
+		shadow
+		sudo
+		system-group-wheel
+		systemd
+		time
+		timezone
+		tree
+		unzip
+		util-linux
+		util-linux-systemd
+		wget
+		words
+		xauth
+		zip
+		Mesa-dri
+		libvulkan1
+		libvulkan_intel
+		libvulkan_radeon
+	"
+	# Mark gpg errors (exit code 106) as non-fatal, but don't pull anything from unverified repos
+	# shellcheck disable=SC2086,SC2046
+	zypper -n install -y $(zypper -n -q se --match-exact ${deps} | grep -e 'package$' | cut -d'|' -f2) || [ ${?} = 106 ]
+
+	# In case the locale is not available, install it
+	# will ensure we don't fallback to C.UTF-8
+	if ! locale -a | grep -qi en_us.utf8 || ! locale -a | grep -qi "$(echo "${HOST_LOCALE}" | tr -d '-')"; then
+		LANG="${HOST_LOCALE}" localedef -i "${HOST_LOCALE_LANG}" -f "${HOST_LOCALE_ENCODING}" "${HOST_LOCALE}" || true
+	fi
+
+	# Ensure we have tzdata installed and populated, sometimes container
+	# images blank the zoneinfo directory, so we reinstall the package to
+	# ensure population
+	if [ ! -e /usr/share/zoneinfo/UTC ]; then
+		zypper install -f -y timezone
+	fi
+
+	# Install additional packages passed at distrbox-create time
+	if [ -n "${container_additional_packages}" ]; then
+		# shellcheck disable=SC2086
+		zypper install -y ${container_additional_packages}
+	fi
+}
 
 # Check dependencies in a list, and install all if one is missing
 missing_packages=0
@@ -389,964 +1645,58 @@ for dep in ${dependencies}; do
 	! command -v "${dep}" > /dev/null && missing_packages=1 && break
 done
 
+# Ensure we have the least minimal path of standard Linux File System set
+PATH="${PATH}:/bin:/sbin:/usr/bin:/usr/sbin"
+
+# Setup pkg manager exceptions and excludes
+if command -v apt-get; then
+	setup_deb_exceptions
+elif command -v pacman; then
+	setup_pacman_exceptions
+elif command -v xbps-install; then
+	setup_xbps_exceptions
+elif command -v zypper; then
+	setup_rpm_exceptions
+elif command -v dnf; then
+	setup_rpm_exceptions
+elif command -v microdnf; then
+	setup_rpm_exceptions
+elif command -v yum; then
+	setup_rpm_exceptions
+fi
+
 # Check if dependencies are met for the script to run.
 if [ "${upgrade}" -ne 0 ] ||
 	[ "${missing_packages}" -ne 0 ] ||
-	{ [ -n "${container_additional_packages}" ] && [ ! -e /.containersetupdone ]; }; then
+	{
+		[ -n "${container_additional_packages}" ] && [ ! -e /.containersetupdone ]
+	}; then
 
 	# Detect the available package manager
 	# install minimal dependencies needed to bootstrap the container:
-	#	the same shell that's on the host
-	#	sudo, mount, find
-	#	passwd, groupadd and useradd
+	#	the same shell that's on the host + ${dependencies}
 	if command -v apk; then
-		# If we need to upgrade, do it and exit, no further action required.
-		if [ "${upgrade}" -ne 0 ]; then
-			apk upgrade
-			exit
-		fi
-		# Check if shell_pkg is available in distro's repo. If not we
-		# fall back to bash, and we set the SHELL variable to bash so
-		# that it is set up correctly for the user.
-		if ! apk add "${shell_pkg}"; then
-			shell_pkg="bash"
-		fi
-		deps="
-			${shell_pkg}
-			alpine-base
-			bash
-			bash-completion
-			bc
-			bzip2
-			coreutils
-			curl
-			diffutils
-			docs
-			findmnt
-			findutils
-			gcompat
-			gnupg
-			gpg
-			iproute2
-			iputils
-			keyutils
-			less
-			libc-utils
-			libcap
-			lsof
-			man-pages
-			mandoc
-			mount
-			musl-utils
-			ncurses
-			ncurses-terminfo
-			net-tools
-			openssh-client
-			pigz
-			pinentry
-			posix-libc-utils
-			procps
-			rsync
-			shadow
-			su-exec
-			sudo
-			tar
-			tcpdump
-			tree
-			tzdata
-			umount
-			unzip
-			util-linux
-			util-linux-misc
-			vte3
-			wget
-			which
-			xauth
-			xz
-			zip
-			$(apk search -q mesa-dri)
-			$(apk search -q mesa-vulkan)
-			vulkan-loader
-		"
-		install_pkg=""
-		for dep in ${deps}; do
-			if apk info "${dep}" > /dev/null; then
-				install_pkg="${install_pkg} ${dep}"
-			fi
-		done
-		# shellcheck disable=SC2086
-		apk add --force-overwrite ${install_pkg}
-
-		# Ensure we have tzdata installed and populated, sometimes container
-		# images blank the zoneinfo directory, so we reinstall the package to
-		# ensure population
-		if [ ! -e /usr/share/zoneinfo/UTC ]; then
-			apk del tzdata
-			apk add tzdata
-		fi
-
-		# Install additional packages passed at distrbox-create time
-		if [ -n "${container_additional_packages}" ]; then
-			# shellcheck disable=SC2086
-			apk add --force-overwrite ${container_additional_packages}
-		fi
-
-		# Workaround for when sudo is missing, we use su-exec as a replacement.
-		if [ -e /sbin/su-exec ]; then
-			chmod u+s /sbin/su-exec
-
-			if [ ! -e /usr/bin/sudo ]; then
-				printf "%s\n%s" '#!/bin/sh' '/sbin/su-exec root "$@"' > /usr/bin/sudo
-				chmod +x /usr/bin/sudo
-			fi
-		fi
-
+		setup_apk
 	elif command -v apt-get; then
-		# If we need to upgrade, do it and exit, no further action required.
-		if [ "${upgrade}" -ne 0 ]; then
-			apt-get update
-			apt-get upgrade -y
-			exit
-		fi
-		# In Ubuntu official images, dpkg is configured to ignore locale and docs
-		# This however, results in a rather poor out-of-the-box experience
-		# So, let's enable them.
-		rm -f /etc/dpkg/dpkg.cfg.d/excludes
-
-		export DEBIAN_FRONTEND=noninteractive
-		apt-get update
-		# Check if shell_pkg is available in distro's repo. If not we
-		# fall back to bash, and we set the SHELL variable to bash so
-		# that it is set up correctly for the user.
-		if ! apt-get install -y "${shell_pkg}"; then
-			shell_pkg="bash"
-		fi
-		deps="
-			${shell_pkg}
-			apt-utils
-			bash-completion
-			bc
-			bzip2
-			curl
-			dialog
-			diffutils
-			findutils
-			gnupg
-			gnupg2
-			gpgsm
-			hostname
-			iproute2
-			iputils-ping
-			keyutils
-			language-pack-en
-			less
-			libcap2-bin
-			libkrb5-3
-			libnss-mdns
-			libnss-myhostname
-			libvte-2.9*-common
-			libvte-common
-			locales
-			lsof
-			man-db
-			manpages
-			mtr
-			ncurses-base
-			openssh-client
-			passwd
-			pigz
-			pinentry-curses
-			procps
-			rsync
-			sudo
-			tcpdump
-			time
-			traceroute
-			tree
-			tzdata
-			unzip
-			util-linux
-			wget
-			xauth
-			xz-utils
-			zip
-			libegl1-mesa
-			libgl1-mesa-glx
-			libvulkan1
-			mesa-vulkan-drivers
-		"
-		install_pkg=""
-		for dep in ${deps}; do
-			if apt-cache show "${dep}" | grep -q Package; then
-				install_pkg="${install_pkg} ${dep}"
-			fi
-		done
-		# shellcheck disable=SC2086
-		apt-get install -y ${install_pkg}
-
-		# In case the locale is not available, install it
-		# will ensure we don't fallback to C.UTF-8
-		if ! locale -a | grep -qi en_us.utf8; then
-			sed -i "s|#.*en_US.UTF-8|en_US.UTF-8|g" /etc/locale.gen
-			locale-gen
-			update-locale LC_ALL=en_US.UTF-8 LANG=en_US.UTF-8
-			dpkg-reconfigure locales
-		fi
-
-		# Ensure we have tzdata installed and populated, sometimes container
-		# images blank the zoneinfo directory, so we reinstall the package to
-		# ensure population
-		if [ ! -e /usr/share/zoneinfo/UTC ]; then
-			apt-get --reinstall install tzdata
-		fi
-
-		# Install additional packages passed at distrbox-create time
-		if [ -n "${container_additional_packages}" ]; then
-			# shellcheck disable=SC2086
-			apt-get install -y ${container_additional_packages}
-		fi
-
-	elif command -v dnf; then
-		# If we need to upgrade, do it and exit, no further action required.
-		if [ "${upgrade}" -ne 0 ]; then
-			dnf upgrade -y
-			exit
-		fi
-		# In dnf family official images, dnf is configured to ignore locale and docs
-		# This however, results in a rather poor out-of-the-box experience
-		# So, let's enable them.
-		sed -i '/tsflags=nodocs/d' /etc/dnf/dnf.conf
-
-		# Check if shell_pkg is available in distro's repo. If not we
-		# fall back to bash, and we set the SHELL variable to bash so
-		# that it is set up correctly for the user.
-		if ! dnf install -y "${shell_pkg}"; then
-			shell_pkg="bash"
-		fi
-		deps="
-			${shell_pkg}
-			bash-completion
-			bc
-			bzip2
-			curl
-			diffutils
-			dnf-plugins-core
-			findutils
-			glibc-all-langpacks
-			glibc-locale-source
-			gnupg2
-			gnupg2-smime
-			hostname
-			iproute
-			iputils
-			keyutils
-			krb5-libs
-			less
-			lsof
-			man-db
-			man-pages
-			mtr
-			ncurses
-			nss-mdns
-			openssh-clients
-			pam
-			passwd
-			pigz
-			pinentry
-			procps-ng
-			rsync
-			shadow-utils
-			sudo
-			tcpdump
-			time
-			traceroute
-			tree
-			tzdata
-			unzip
-			util-linux
-			vte-profile
-			wget
-			which
-			whois
-			words
-			xorg-x11-xauth
-			xz
-			zip
-			mesa-dri-drivers
-			mesa-vulkan-drivers
-			vulkan
-		"
-		# shellcheck disable=SC2086,2046
-		dnf install -y --allowerasing $(dnf repoquery -q --latest-limit 1 --arch "$(uname -m)" ${deps})
-
-		# In case the locale is not available, install it
-		# will ensure we don't fallback to C.UTF-8
-		if ! locale -a | grep -qi en_us.utf8; then
-			LANG=en_US.UTF-8 localedef -i en_US -f UTF-8 en_US.UTF-8
-		fi
-
-		# Ensure we have tzdata installed and populated, sometimes container
-		# images blank the zoneinfo directory, so we reinstall the package to
-		# ensure population
-		if [ ! -e /usr/share/zoneinfo/UTC ]; then
-			dnf reinstall -y tzdata
-		fi
-
-		# Install additional packages passed at distrbox-create time
-		if [ -n "${container_additional_packages}" ]; then
-			# shellcheck disable=SC2086
-			dnf install -y ${container_additional_packages}
-		fi
-
+		setup_apt
 	elif command -v emerge; then
-		# Check if the container we are using has a ::gentoo repo defined,
-		# if it is defined and it is empty, then synchroznize it.
-		gentoo_repo="$(portageq get_repo_path / gentoo)"
-		if [ -n "${gentoo_repo}" ] && [ ! -e "${gentoo_repo}" ]; then
-			emerge-webrsync
-		fi
-		# If we need to upgrade, do it and exit, no further action required.
-		if [ "${upgrade}" -ne 0 ]; then
-			emerge --sync
-			exit
-		fi
-		# Check if shell_pkg is available in distro's repo. If not we
-		# fall back to bash, and we set the SHELL variable to bash so
-		# that it is set up correctly for the user.
-		if ! emerge --ask=n --autounmask-continue --noreplace --quiet-build "${shell_pkg}"; then
-			shell_pkg="bash"
-		fi
-		deps="
-			${shell_pkg}
-			app-crypt/gnupg
-			bash-completion
-			diffutils
-			findutils
-			less
-			ncurses
-			net-misc/curl
-			pinentry
-			procps
-			shadow
-			sudo
-			sys-devel/bc
-			sys-process/lsof
-			util-linux
-			wget
-		"
-		install_pkg=""
-		for dep in ${deps}; do
-			if [ "$(emerge --search "${dep}" | grep "Applications found" | grep -Eo "[0-9]")" -gt 0 ]; then
-				# shellcheck disable=SC2086
-				install_pkg="${install_pkg} ${dep}"
-			fi
-		done
-		# shellcheck disable=SC2086
-		emerge --ask=n --autounmask-continue --noreplace --quiet-build ${install_pkg}
-
-		# In case the locale is not available, install it
-		# will ensure we don't fallback to C.UTF-8
-		if ! locale -a | grep -qi en_us.utf8; then
-			sed -i "s|#.*en_US.UTF-8|en_US.UTF-8|g" /etc/locale.gen
-			locale-gen
-			cat << EOF > /etc/env.d/02locale
-LANG=en_US.UTF-8
-LC_CTYPE=en_US.UTF-8
-EOF
-		fi
-
-		# Install additional packages passed at distrbox-create time
-		if [ -n "${container_additional_packages}" ]; then
-			# shellcheck disable=SC2086
-			emerge --ask=n --autounmask-continue --noreplace --quiet-build \
-				${container_additional_packages}
-		fi
-
-	elif command -v microdnf; then
-		# If we need to upgrade, do it and exit, no further action required.
-		if [ "${upgrade}" -ne 0 ]; then
-			microdnf upgrade -y
-			exit
-		fi
-		# Check if shell_pkg is available in distro's repo. If not we
-		# fall back to bash, and we set the SHELL variable to bash so
-		# that it is set up correctly for the user.
-		if ! microdnf install -y "${shell_pkg}"; then
-			shell_pkg="bash"
-		fi
-		deps="
-			${shell_pkg}
-			bash-completion
-			bc
-			bzip2
-			diffutils
-			dnf-plugins-core
-			findutils
-			glibc-all-langpacks
-			glibc-locale-source
-			gnupg2
-			gnupg2-smime
-			hostname
-			iproute
-			iputils
-			keyutils
-			krb5-libs
-			less
-			lsof
-			man-db
-			man-pages
-			mtr
-			ncurses
-			nss-mdns
-			openssh-clients
-			pam
-			passwd
-			pigz
-			pinentry
-			procps-ng
-			rsync
-			shadow-utils
-			sudo
-			tcpdump
-			time
-			traceroute
-			tree
-			tzdata
-			unzip
-			util-linux
-			vte-profile
-			wget
-			which
-			whois
-			words
-			xorg-x11-xauth
-			xz
-			zip
-			mesa-dri-drivers
-			mesa-vulkan-drivers
-			vulkan
-		"
-		install_pkg=""
-		for dep in ${deps}; do
-			if [ "$(microdnf repoquery "${dep}" | wc -l)" -gt 0 ]; then
-				install_pkg="${install_pkg} ${dep}"
-			fi
-		done
-		# shellcheck disable=SC2086,SC2046
-		microdnf install -y ${install_pkg}
-
-		# In case the locale is not available, install it
-		# will ensure we don't fallback to C.UTF-8
-		if ! locale -a | grep -qi en_us.utf8; then
-			LANG=en_US.UTF-8 localedef -i en_US -f UTF-8 en_US.UTF-8
-		fi
-
-		# Ensure we have tzdata installed and populated, sometimes container
-		# images blank the zoneinfo directory, so we reinstall the package to
-		# ensure population
-		if [ ! -e /usr/share/zoneinfo/UTC ]; then
-			microdnf reinstall -y tzdata
-		fi
-
-		# Install additional packages passed at distrbox-create time
-		if [ -n "${container_additional_packages}" ]; then
-			# shellcheck disable=SC2086
-			microdnf install -y ${container_additional_packages}
-		fi
-
+		setup_emerge
 	elif command -v pacman; then
-		# Update the package repository cache exactly once before installing packages.
-		pacman -S -y -y
-
-		# If we need to upgrade, do it and exit, no further action required.
-		if [ "${upgrade}" -ne 0 ]; then
-			pacman -S -u --noconfirm
-			exit
-		fi
-		# In archlinux official images, pacman is configured to ignore locale and docs
-		# This however, results in a rather poor out-of-the-box experience
-		# So, let's enable them.
-		sed -i "s|NoExtract.*||g" /etc/pacman.conf
-		sed -i "s|NoProgressBar.*||g" /etc/pacman.conf
-
-		# In case the locale is not available, install it
-		# will ensure we don't fallback to C.UTF-8
-		if ! locale -a | grep -qi en_us.utf8; then
-			sed -i "s|#.*en_US.UTF-8|en_US.UTF-8|g" /etc/locale.gen
-			locale-gen -a
-		fi
-
-		# Check if shell_pkg is available in distro's repo. If not we
-		# fall back to bash, and we set the SHELL variable to bash so
-		# that it is set up correctly for the user.
-		if ! pacman -S --needed --noconfirm "${shell_pkg}"; then
-			shell_pkg="bash"
-		fi
-		deps="
-			${shell_pkg}
-			bash-completion
-			bc
-			curl
-			diffutils
-			findutils
-			glibc
-			gnupg
-			inetutils
-			keyutils
-			less
-			lsof
-			man-db
-			man-pages
-			mlocate
-			mtr
-			ncurses
-			nss-mdns
-			openssh
-			pigz
-			pinentry
-			procps-ng
-			rsync
-			shadow
-			sudo
-			tcpdump
-			time
-			traceroute
-			tree
-			tzdata
-			unzip
-			util-linux
-			util-linux-libs
-			vte-common
-			wget
-			words
-			xorg-xauth
-			zip
-			mesa
-			opengl-driver
-			vulkan-intel
-			vte-common
-			vulkan-radeon
-		"
-		install_pkg=""
-		for dep in ${deps}; do
-			if pacman -Ss "${dep}" > /dev/null; then
-				install_pkg="${install_pkg} ${dep}"
-			fi
-		done
-		# shellcheck disable=SC2086
-		pacman -S --noconfirm ${install_pkg}
-
-		# Ensure we have tzdata installed and populated, sometimes container
-		# images blank the zoneinfo directory, so we reinstall the package to
-		# ensure population
-		if [ ! -e /usr/share/zoneinfo/UTC ]; then
-			pacman -S --noconfirm tzdata
-		fi
-
-		# Install additional packages passed at distrbox-create time
-		if [ -n "${container_additional_packages}" ]; then
-			# shellcheck disable=SC2086
-			pacman -S --needed --noconfirm ${container_additional_packages}
-		fi
-
+		setup_pacman
 	elif command -v slackpkg; then
-		# If we need to upgrade, do it and exit, no further action required.
-		if [ "${upgrade}" -ne 0 ]; then
-			yes | slackpkg upgrade-all -default_answer=yes -batch=yes
-			exit
-		fi
-		slackpkg update
-		# Check if shell_pkg is available in distro's repo. If not we
-		# fall back to bash, and we set the SHELL variable to bash so
-		# that it is set up correctly for the user.
-		if ! yes | slackpkg install -default_answer=yes -batch=yes "${shell_pkg}"; then
-			shell_pkg="bash"
-		fi
-		deps="
-			${shell_pkg}
-			bash-completion
-			bc
-			curl
-			diffutils
-			findutils
-			glew
-			glibc
-			glu
-			gnupg2
-			iputils
-			less
-			libX11
-			libXau
-			libXdamage
-			libXdmcp
-			libXext
-			libXfixes
-			libXxf86vm
-			libdrm
-			libvte-2
-			libxcb
-			libxcb-dri2
-			libxcb-dri3
-			libxcb-glx
-			libxcb-present
-			libxcb-randr
-			libxcb-render
-			libxcb-shape
-			libxcb-sync
-			libxcb-xfixes
-			libxshmfence
-			lsof
-			man
-			mesa
-			ncurses
-			openssh
-			pinentry
-			procps
-			rsync
-			shadow
-			ssh
-			sudo
-			time
-			wget
-			xauth
-		"
-		install_pkg=""
-		dep=""
-		for dep in ${deps}; do
-			if ! slackpkg search "${dep}" | grep -q "No package name matches the pattern"; then
-				install_pkg="${install_pkg} ${dep}"
-			fi
-		done
-
-		rm -f /var/lock/slackpkg.*
-
-		# shellcheck disable=SC2086
-		yes | slackpkg install -default_answer=yes -batch=yes ${install_pkg}
-
-		# Install additional packages passed at distrbox-create time
-		if [ -n "${container_additional_packages}" ]; then
-			# shellcheck disable=SC2086
-			yes | slackpkg install -default_answer=yes -batch=yes \
-				${container_additional_packages}
-		fi
-
+		setup_slackpkg
 	elif command -v swupd; then
-		# If we need to upgrade, do it and exit, no further action required.
-		if [ "${upgrade}" -ne 0 ]; then
-			swupd update
-			exit
-		fi
-
-		swupd bundle-add os-core-search
-
-		deps="
-			bc
-			cryptography
-			curl
-			network-basic
-			procps-ng
-			rsync
-			shells
-			sysadmin-basic
-			unzip
-			wget
-			x11-tools
-			zip
-			devpkg-Vulkan-Loader
-			lib-opengl
-		"
-		install_pkg=""
-		for dep in ${deps}; do
-			if swupd search "${dep}" > /dev/null; then
-				install_pkg="${install_pkg} ${dep}"
-			fi
-		done
-		# shellcheck disable=SC2086
-		swupd bundle-add ${install_pkg}
-
-		# Install additional packages passed at distrbox-create time
-		if [ -n "${container_additional_packages}" ]; then
-			# shellcheck disable=SC2086
-			swupd bundle-add ${container_additional_packages}
-		fi
-
+		setup_swupd
 	elif command -v xbps-install; then
-		# If we need to upgrade, do it and exit, no further action required.
-		if [ "${upgrade}" -ne 0 ]; then
-			xbps-install -Syu
-			exit
-		fi
-		# Ensure we avoid errors by keeping xbps updated
-		xbps-install -Syu xbps
-		# We have to lock this package, as it's incompatible with distrobox's
-		# mount process.
-		xbps-pkgdb -m repolock base-files
-		# Check if shell_pkg is available in distro's repo. If not we
-		# fall back to bash, and we set the SHELL variable to bash so
-		# that it is set up correctly for the user.
-		if ! xbps-install -Sy "${shell_pkg}"; then
-			shell_pkg="bash"
-		fi
-		deps="
-			${shell_pkg}
-			bash-completion
-			bc
-			bzip2
-			curl
-			diffutils
-			findutils
-			gnupg2
-			inetutils-ping
-			iproute2
-			less
-			lsof
-			man-db
-			mit-krb5-client
-			mit-krb5-libs
-			mtr
-			ncurses-base
-			nss
-			openssh
-			pigz
-			pinentry-tty
-			procps-ng
-			rsync
-			shadow
-			sudo
-			time
-			traceroute
-			tree
-			tzdata
-			unzip
-			util-linux
-			xauth
-			xz
-			zip
-			wget
-			vte3
-			mesa-dri
-			vulkan-loader
-			mesa-vulkan-intel
-			mesa-vulkan-radeon
-		"
-		install_pkg=""
-		for dep in ${deps}; do
-			if [ "$(xbps-query -Rs "${dep}" | wc -l)" -gt 0 ]; then
-				install_pkg="${install_pkg} ${dep}"
-			fi
-		done
-		# shellcheck disable=SC2086
-		xbps-install -Sy ${install_pkg}
-
-		# In case the locale is not available, install it
-		# will ensure we don't fallback to C.UTF-8
-		if ! locale -a | grep -qi en_us.utf8; then
-			sed -i "s|#.*en_US.UTF-8|en_US.UTF-8|g" /etc/default/libc-locales
-			xbps-reconfigure --force glibc-locales
-		fi
-
-		# Ensure we have tzdata installed and populated, sometimes container
-		# images blank the zoneinfo directory, so we reinstall the package to
-		# ensure population
-		if [ ! -e /usr/share/zoneinfo/UTC ]; then
-			xbps-install --force -y tzdata
-		fi
-
-		# Install additional packages passed at distrbox-create time
-		if [ -n "${container_additional_packages}" ]; then
-			# shellcheck disable=SC2086
-			xbps-install -Sy ${container_additional_packages}
-		fi
-
-	elif command -v yum; then
-		# If we need to upgrade, do it and exit, no further action required.
-		if [ "${upgrade}" -ne 0 ]; then
-			yum upgrade -y
-			exit
-		fi
-		# In yum family official images, yum is configured to ignore locale and docs
-		# This however, results in a rather poor out-of-the-box experience
-		# So, let's enable them.
-		sed -i '/tsflags=nodocs/d' /etc/yum.conf
-
-		# Check if shell_pkg is available in distro's repo. If not we
-		# fall back to bash, and we set the SHELL variable to bash so
-		# that it is set up correctly for the user.
-		if ! yum install -y "${shell_pkg}"; then
-			shell_pkg="bash"
-		fi
-		deps="
-			${shell_pkg}
-			bash-completion
-			bc
-			bzip2
-			curl
-			diffutils
-			dnf-plugins-core
-			findutils
-			glibc-all-langpacks
-			glibc-locale-source
-			gnupg2
-			gnupg2-smime
-			hostname
-			iproute
-			iputils
-			keyutils
-			krb5-libs
-			less
-			lsof
-			man-db
-			man-pages
-			mtr
-			ncurses
-			nss-mdns
-			openssh-clients
-			pam
-			passwd
-			pigz
-			pinentry
-			procps-ng
-			rsync
-			shadow-utils
-			sudo
-			tcpdump
-			time
-			traceroute
-			tree
-			tzdata
-			unzip
-			util-linux
-			vte-profile
-			wget
-			which
-			whois
-			words
-			xorg-x11-xauth
-			xz
-			zip
-			mesa-dri-drivers
-			mesa-vulkan-drivers
-			vulkan
-		"
-		# shellcheck disable=SC2086,SC2046
-		yum install -y $(yum list -q ${deps} |
-			grep -v "Packages" |
-			grep "$(uname -m)" |
-			cut -d' ' -f1)
-
-		# In case the locale is not available, install it
-		# will ensure we don't fallback to C.UTF-8
-		if ! locale -a | grep -qi en_us.utf8; then
-			LANG=en_US.UTF-8 localedef -i en_US -f UTF-8 en_US.UTF-8
-		fi
-
-		# Ensure we have tzdata installed and populated, sometimes container
-		# images blank the zoneinfo directory, so we reinstall the package to
-		# ensure population
-		if [ ! -e /usr/share/zoneinfo/UTC ]; then
-			yum reinstall -y tzdata
-		fi
-
-		# Install additional packages passed at distrbox-create time
-		if [ -n "${container_additional_packages}" ]; then
-			# shellcheck disable=SC2086
-			yum install -y ${container_additional_packages}
-		fi
-
+		setup_xbps
 	elif command -v zypper; then
-		# If we need to upgrade, do it and exit, no further action required.
-		if [ "${upgrade}" -ne 0 ]; then
-			zypper dup -y
-			exit
-		fi
-		if ! zypper install -y "${shell_pkg}"; then
-			shell_pkg="bash"
-		fi
-
-		# In openSUSE official images, zypper is configured to ignore recommended
-		# packages (i.e., weak dependencies). This however, results in a rather
-		# poor out-of-the-box experience (e.g., when trying to run GUI apps).
-		# So, let's enable them. For the same reason, we make sure we install
-		# docs.
-		sed -i 's/.*solver.onlyRequires.*/solver.onlyRequires = false/g' /etc/zypp/zypp.conf
-		sed -i 's/.*rpm.install.excludedocs.*/rpm.install.excludedocs = no/g' /etc/zypp/zypp.conf
-		# With recommended packages, something might try to pull in
-		# parallel-printer-support which can't be installed in rootless containers.
-		# Since we very much likely never need it, just lock it
-		zypper al parallel-printer-support
-		# Check if shell_pkg is available in distro's repo. If not we
-		# fall back to bash, and we set the SHELL variable to bash so
-		# that it is set up correctly for the user.
-		deps="
-			${shell_pkg}
-			bash-completion
-			bc
-			bzip2
-			curl
-			diffutils
-			findutils
-			glibc-locale
-			glibc-locale-base
-			gnupg
-			hostname
-			iputils
-			keyutils
-			less
-			libvte-2*
-			lsof
-			man
-			man-pages
-			mtr
-			ncurses
-			nss-mdns
-			openssh-clients
-			pam
-			pam-extra
-			pigz
-			pinentry
-			procps
-			rsync
-			shadow
-			sudo
-			system-group-wheel
-			systemd
-			time
-			timezone
-			tree
-			unzip
-			util-linux
-			util-linux-systemd
-			wget
-			words
-			xauth
-			zip
-			Mesa-dri
-			libvulkan1
-			libvulkan_intel
-			libvulkan_radeon
-		"
-		# Mark gpg errors (exit code 106) as non-fatal, but don't pull anything from unverified repos
-		# shellcheck disable=SC2086,SC2046
-		zypper -n install -y $(zypper -n -q se -x ${deps} | grep -e 'package$' | cut -d'|' -f2) || [ ${?} = 106 ]
-
-		# In case the locale is not available, install it
-		# will ensure we don't fallback to C.UTF-8
-		if ! locale -a | grep -qi en_us.utf8; then
-			LANG=en_US.UTF-8 localedef -i en_US -f UTF-8 en_US.UTF-8
-		fi
-
-		# Ensure we have tzdata installed and populated, sometimes container
-		# images blank the zoneinfo directory, so we reinstall the package to
-		# ensure population
-		if [ ! -e /usr/share/zoneinfo/UTC ]; then
-			zypper install -f -y timezone
-		fi
-
-		# Install additional packages passed at distrbox-create time
-		if [ -n "${container_additional_packages}" ]; then
-			# shellcheck disable=SC2086
-			zypper install -y ${container_additional_packages}
-		fi
+		setup_zypper
+	elif command -v dnf; then
+		setup_dnf dnf
+	elif command -v microdnf; then
+		setup_microdnf
+	elif command -v yum; then
+		setup_dnf yum
 	else
 		printf "Error: could not find a supported package manager.\n"
 		printf "Error: could not set up base dependencies.\n"
@@ -1370,17 +1720,50 @@ if ! command -v xdg-open; then
 	mkdir -p /usr/local/bin/
 	ln -sf /usr/bin/distrobox-host-exec /usr/local/bin/xdg-open
 fi
+
+# If flatpak is not present, do a link of it. This is handy to handle opening of
+# links, files and apps from inside the container into the host.
+# Note: we're using /usr/bin instead of /usr/local/bin because xdg-open will read
+# the desktopfile, which will contain an absolute path of /usr/bin/flatpak
+if ! command -v flatpak; then
+	ln -sf /usr/bin/distrobox-host-exec /usr/bin/flatpak
+fi
+
 ###############################################################################
+
+# Ensure compatibility with older versions of su, this will allow to specify
+# the --pty flag
+#
+# This won't work well on very old distros with no flag support, but will give
+# an usable shell nonetheless
+if ! su --help | grep -q pty; then
+	cat << EOF > /usr/local/bin/su
+#!/bin/sh
+
+for i do
+  [ "\$i" = --pty ] || set -- "\$@" "\$i"
+  shift
+done
+
+/bin/su "\$@"
+EOF
+	chmod +x /usr/local/bin/su
+fi
 
 ###############################################################################
 printf "distrobox: Setting up devpts mounts...\n"
+
+# First we need to ensure we have a tty group to assign /dev/pts to
+if ! grep -q tty /etc/group; then
+	printf "%s" 'tty:x:5:' >> /etc/group
+fi
 
 # Instantiate a new /dev/pts mount, this will ensure pseudoterminals are container-scoped
 # and make easier in case of initful containers to have a separate /dev/console
 #
 # Podman supports a mount option to do this at creation time, but we're doing it
 # here to support also other container rmanagers which does not support that flag
-mount -t devpts devpts -o noexec,nosuid,newinstance,ptmxmode=0666,mode=0620 /dev/pts/
+mount -t devpts devpts -o noexec,nosuid,newinstance,ptmxmode=0666,mode=0620,gid=tty /dev/pts/
 mount --bind /dev/pts/ptmx /dev/ptmx
 
 # Change mount propagation to shared to make the environment more similar to a
@@ -1391,16 +1774,19 @@ mount --make-rshared /
 ###############################################################################
 printf "distrobox: Setting up read-only mounts...\n"
 
-# We'll also bind mount in READ-ONLY useful directories from the host
-HOST_MOUNTS_RO="
-	/etc/localtime
-	/var/lib/systemd/coredump
-	/var/log/journal"
 for host_mount_ro in ${HOST_MOUNTS_RO}; do
 	# Mounting read-only in a user namespace will trigger a check to see if certain
-	# "locked" flags are changed. This ensures we explicitly reuse those flags.
+	# "locked" flags (line noexec,nodev,nosuid) are changed. This ensures we explicitly reuse those flags.
 	locked_flags="$(get_locked_mount_flags /run/host"${host_mount_ro}")"
-	mount_bind /run/host"${host_mount_ro}" "${host_mount_ro}" ro"${locked_flags:+,${locked_flags}}"
+	if ! mount_bind /run/host"${host_mount_ro}" "${host_mount_ro}" ro"${locked_flags:+,${locked_flags}}"; then
+		printf "Warning: %s integration with the host failed, runtime sync for %s disabled.\n" "${host_mount_ro}" "${host_mount_ro}"
+		# Fallback options for files, we do a hard copy of it
+		if [ -f /run/host"${host_mount_ro}" ]; then
+			if ! (rm -f "${host_mount_ro}" && cp -f /run/host"${host_mount_ro}" "${host_mount_ro}"); then
+				printf "Warning: Hard copy failed. Error: %s\n" "$(cp -f /run/host"${host_mount_ro}" "${host_mount_ro}" 2>&1)"
+			fi
+		fi
+	fi
 done
 ###############################################################################
 
@@ -1416,24 +1802,6 @@ if [ -e "/var/home/${container_user_name}" ]; then
 	fi
 fi
 
-# We'll also bind mount READ-WRITE useful mountpoints to pass external drives and libvirt from
-# the host to the container
-HOST_MOUNTS="
-	/etc/host.conf
-	/etc/machine-id
-	/media
-	/mnt
-	/run/libvirt
-	/run/media
-	/run/netconfig/
-	/run/systemd/journal
-	/run/systemd/resolve/
-	/run/systemd/seats
-	/run/systemd/sessions
-	/run/systemd/users
-	/run/udev
-	/var/lib/libvirt
-	/var/mnt"
 for host_mount in ${HOST_MOUNTS}; do
 	if ! mount_bind /run/host"${host_mount}" "${host_mount}"; then
 		printf "Warning: Cannot bind mount %s to /run/host%s\n" "${host_mount}" "${host_mount}"
@@ -1479,79 +1847,162 @@ done
 if [ "${nvidia}" -eq 1 ]; then
 	printf "distrobox: Setting up host's nvidia integration...\n"
 
+	# Refresh ldconfig cache, also detect if there are empty files remaining
+	# and clean them.
+	# This could happen when upgrading drivers and changing versions.
+	find /usr/lib* -empty -iname "*.so.*" -exec sh -c 'rm -rf "$1" || umount "$1" && rm -rf "$1"' sh {} ';' || :
+	find /usr/ /etc/ -empty -iname "*nvidia*" -exec sh -c 'rm -rf "$1" || umount "$1" && rm -rf "$1"' sh {} ';' || :
+
+	# First we find all generic config files we might need
+	NVIDIA_FILES="$(find /run/host/etc/ -not -type d \
+		-wholename "*nvidia*" || :)"
+	for nvidia_file in ${NVIDIA_FILES}; do
+		dest_file="$(printf "%s" "${nvidia_file}" | sed 's|/run/host||g')"
+
+		if [ ! -e "$(dirname "${dest_file}")" ]; then
+			if ! mkdir -p "$(dirname "${dest_file}")"; then
+				printf "Warning: skpping file %s, %s mounted as read-only\n" "${dest_file}" "$(dirname "${dest_file}")"
+				continue
+			fi
+		fi
+		if [ ! -w "$(dirname "${dest_file}")" ]; then
+			printf "Warning: skpping file %s, %s mounted as read-only\n" "${dest_file}" "$(dirname "${dest_file}")"
+			continue
+		fi
+
+		type="file"
+		if [ -L "${nvidia_file}" ]; then
+			type="link"
+		fi
+
+		if [ "${type}" = "link" ]; then
+			nvidia_file="$(readlink -fm "${nvidia_file}")"
+		fi
+		# Mounting read-only in a user namespace will trigger a check to see if certain
+		# "locked" flags (line noexec,nodev,nosuid) are changed. This ensures we explicitly reuse those flags.
+		locked_flags="$(get_locked_mount_flags "${nvidia_file}")"
+		mount_bind "${nvidia_file}" "${dest_file}" ro"${locked_flags:+,${locked_flags}}"
+	done
+
+	# Then we find all non-lib files we need, this includes
+	#       - egl files
+	#       - icd files
+	#       - doc files
+	#       - src files
+	NVIDIA_CONFS="$(find /run/host/usr/ -not -type d \
+		-wholename "*glvnd/egl_vendor.d/10_nvidia.json" \
+		-o -wholename "*X11/xorg.conf.d/10-nvidia.conf" \
+		-o -wholename "*X11/xorg.conf.d/nvidia-drm-outputclass.conf" \
+		-o -wholename "*egl/egl_external_platform.d/10_nvidia_wayland.json" \
+		-o -wholename "*egl/egl_external_platform.d/15_nvidia_gbm.json" \
+		-o -wholename "*nvidia/nvoptix.bin" \
+		-o -wholename "*vulkan/icd.d/nvidia_icd.json" \
+		-o -wholename "*vulkan/icd.d/nvidia_layers.json" \
+		-o -wholename "*vulkan/implicit_layer.d/nvidia_layers.json" \
+		-o -wholename "*nvidia.icd" \
+		-o -wholename "*nvidia.yaml" \
+		-o -wholename "*nvidia.json" || :)"
+	for nvidia_file in ${NVIDIA_CONFS}; do
+		dest_file="$(printf "%s" "${nvidia_file}" | sed 's|/run/host||g')"
+
+		if [ ! -e "$(dirname "${dest_file}")" ]; then
+			if ! mkdir -p "$(dirname "${dest_file}")"; then
+				printf "Warning: skpping file %s, %s mounted as read-only\n" "${dest_file}" "$(dirname "${dest_file}")"
+				continue
+			fi
+		fi
+		if [ ! -w "$(dirname "${dest_file}")" ]; then
+			printf "Warning: skpping file %s, %s mounted as read-only\n" "${dest_file}" "$(dirname "${dest_file}")"
+			continue
+		fi
+		# Mounting read-only in a user namespace will trigger a check to see if certain
+		# "locked" flags (line noexec,nodev,nosuid) are changed. This ensures we explicitly reuse those flags.
+		locked_flags="$(get_locked_mount_flags "${nvidia_file}")"
+		mount_bind "${nvidia_file}" "${dest_file}" ro"${locked_flags:+,${locked_flags}}"
+	done
+
+	# Then we find all the CLI utilities
+	NVIDIA_BINARIES="$(find /run/host/bin/ /run/host/sbin/ /run/host/usr/bin/ /run/host/usr/sbin/ -not -type d \
+		-iname "*nvidia*" || :)"
+	for nvidia_file in ${NVIDIA_BINARIES}; do
+		dest_file="$(printf "%s" "${nvidia_file}" | sed 's|/run/host||g')"
+
+		if [ ! -e "$(dirname "${dest_file}")" ]; then
+			if ! mkdir -p "$(dirname "${dest_file}")"; then
+				printf "Warning: skpping file %s, %s mounted as read-only\n" "${dest_file}" "$(dirname "${dest_file}")"
+				continue
+			fi
+		fi
+		if [ ! -w "$(dirname "${dest_file}")" ]; then
+			printf "Warning: skpping file %s, %s mounted as read-only\n" "${dest_file}" "$(dirname "${dest_file}")"
+			continue
+		fi
+
+		type="file"
+		if [ -L "${nvidia_file}" ]; then
+			type="link"
+		fi
+
+		if [ "${type}" = "link" ]; then
+			nvidia_file="$(readlink -fm "${nvidia_file}")"
+		fi
+		# Mounting read-only in a user namespace will trigger a check to see if certain
+		# "locked" flags (line noexec,nodev,nosuid) are changed. This ensures we explicitly reuse those flags.
+		locked_flags="$(get_locked_mount_flags "${nvidia_file}")"
+		mount_bind "${nvidia_file}" "${dest_file}" ro"${locked_flags:+,${locked_flags}}"
+	done
+
 	# Find where the system expects libraries to be put
 	lib32_dir="/usr/lib/"
 	lib64_dir="/usr/lib/"
 	if [ -e "/usr/lib/x86_64-linux-gnu" ]; then
 		lib64_dir="/usr/lib/x86_64-linux-gnu/"
+		lib32_dir="/usr/lib/i386-linux-gnu/"
 	elif [ -e "/usr/lib64" ]; then
 		lib64_dir="/usr/lib64/"
 	fi
-	if [ -e "/usr/lib/i386-linux-gnu" ]; then
-		lib32_dir="/usr/lib/i386-linux-gnu/"
-	elif [ -e "/usr/lib32" ]; then
+	if [ -e "/usr/lib32" ]; then
 		lib32_dir="/usr/lib32/"
 	fi
 
-	# First we find all non-lib files we need, this includes
-	#	- binaries
-	#	- confs
-	#	- egl files
-	#	- icd files
-	#	Excluding here the libs, we will threat them later specifically
-	NVIDIA_FILES="$(find /run/host/etc/ /run/host/usr/ \
-		-path "/run/host/usr/lib/i386-linux-gnu/*" -prune -o \
-		-path "/run/host/usr/lib/x86_64-linux-gnu/*" -prune -o \
-		-path "/run/host/usr/lib32/*" -prune -o \
-		-path "/run/host/usr/lib64/*" -prune -o \
-		-iname "*nvidia*" -not -type d -print 2> /dev/null || :)"
-	for nvidia_file in ${NVIDIA_FILES}; do
-		dest_file="$(printf "%s" "${nvidia_file}" | sed 's|/run/host||g')"
-
-		mount_bind "${nvidia_file}" "${dest_file}" ro
-	done
-
-	# Then we find all directories with nvidia in the name and just mount them
-	NVIDIA_DIRS="$(find /run/host/etc /run/host/usr -iname "*nvidia*" -type d 2> /dev/null || :)"
-	for nvidia_dir in ${NVIDIA_DIRS}; do
-		# /usr/lib64 is common in Arch or RPM based distros, while /usr/lib/x86_64-linux-gnu is
-		# common on Debian derivatives, so we need to adapt between the two nomenclatures.
-		if printf "%s" "${nvidia_dir}" | grep -Eq "lib32|lib64|x86_64-linux-gnu|i386-linux-gnu"; then
-
-			# Remove origin so we plug our own
-			dest_dir="$(printf "%s" "${nvidia_dir}" |
-				sed "s|/run/host/usr/lib/x86_64-linux-gnu/|${lib64_dir}|g" |
-				sed "s|/run/host/usr/lib/i386-linux-gnu/|${lib32_dir}|g" |
-				sed "s|/run/host/usr/lib64/|${lib64_dir}|g" |
-				sed "s|/run/host/usr/lib32/|${lib32_dir}|g")"
-		else
-			dest_dir="$(printf "%s" "${nvidia_dir}" | sed 's|/run/host||g')"
-		fi
-
-		mount_bind "${nvidia_dir}" "${dest_dir}" ro
-	done
-
-	# Then we find all the ".so" libraries, there are searched separately
+	# Then we find all the ".so" libraries, these are searched separately
 	# because we need to extract the relative path to mount them in the
 	# correct path based on the guest's setup
 	#
 	# /usr/lib64 is common in Arch or RPM based distros, while /usr/lib/x86_64-linux-gnu is
 	# common on Debian derivatives, so we need to adapt between the two nomenclatures.
-	NVIDIA_LIBS="$(find \
-		/run/host/usr/lib/i386-linux-gnu/ \
-		/run/host/usr/lib/x86_64-linux-gnu/ \
-		/run/host/usr/lib32/ \
-		/run/host/usr/lib64/ \
-		-iname "*nvidia*.so*" \
-		-o -iname "libcuda*.so*" \
-		-o -iname "libnvcuvid*.so*" \
-		-o -iname "libnvoptix*.so*" 2> /dev/null || :)"
+	NVIDIA_LIBS="$(find /run/host/usr/lib*/ -not -type d \
+		-iname "*lib*nvidia*.so*" \
+		-o -iname "*nvidia*.so*" \
+		-o -iname "*cuda*.so*" \
+		-o -iname "libnvcuvid*" \
+		-o -iname "libnvoptix*" || :)"
 	for nvidia_lib in ${NVIDIA_LIBS}; do
 		dest_file="$(printf "%s" "${nvidia_lib}" |
 			sed "s|/run/host/usr/lib/x86_64-linux-gnu/|${lib64_dir}|g" |
 			sed "s|/run/host/usr/lib/i386-linux-gnu/|${lib32_dir}|g" |
 			sed "s|/run/host/usr/lib64/|${lib64_dir}|g" |
-			sed "s|/run/host/usr/lib32/|${lib32_dir}|g")"
+			sed "s|/run/host/usr/lib32/|${lib32_dir}|g" |
+			sed "s|/run/host/usr/lib/|${lib32_dir}|g")"
+
+		# If file exists, just continue
+		# this may happen for directories like /usr/lib/nvidia/xorg/foo.so
+		# where the directory is already bind mounted (ro) and we don't need
+		# to mount further files in it.
+		if [ -e "${dest_file}" ]; then
+			continue
+		fi
+
+		if [ ! -e "$(dirname "${dest_file}")" ]; then
+			if ! mkdir -p "$(dirname "${dest_file}")"; then
+				printf "Warning: skpping file %s, %s mounted as read-only\n" "${dest_file}" "$(dirname "${dest_file}")"
+				continue
+			fi
+		fi
+		if [ ! -w "$(dirname "${dest_file}")" ]; then
+			printf "Warning: skpping file %s, %s mounted as read-only\n" "${dest_file}" "$(dirname "${dest_file}")"
+			continue
+		fi
 
 		type="file"
 		if [ -L "${nvidia_lib}" ]; then
@@ -1559,23 +2010,18 @@ if [ "${nvidia}" -eq 1 ]; then
 		fi
 
 		if [ "${type}" = "link" ]; then
-			mkdir -p "$(dirname "${dest_file}")"
-			cp -d "${nvidia_lib}" "${dest_file}"
-			continue
+			nvidia_lib="$(readlink -fm "${nvidia_lib}")"
 		fi
 
-		mount_bind "${nvidia_lib}" "${dest_file}" ro
+		# Mounting read-only in a user namespace will trigger a check to see if certain
+		# "locked" flags (line noexec,nodev,nosuid) are changed. This ensures we explicitly reuse those flags.
+		locked_flags="$(get_locked_mount_flags "${nvidia_lib}")"
+		mount_bind "${nvidia_lib}" "${dest_file}" ro"${locked_flags:+,${locked_flags}}"
 	done
 
-	# Refresh ldconfig cache, also detect if there are empty files remaining
-	# and clean them.
-	# This could happen when upgrading drivers and changing versions.
-	empty_libs="$(ldconfig 2>&1 | grep -Eo "File.*is empty" | cut -d' ' -f2)"
-	if [ -n "${empty_libs}" ]; then
-		# shellcheck disable=SC2086
-		find ${empty_libs} -delete 2> /dev/null || :
-		find /usr/ /etc/ -empty -iname "*nvidia*" -delete 2> /dev/null || :
-	fi
+	# Refresh ldconfig cache
+	ldconfig 2>&1 /dev/null
+
 fi
 
 ###############################################################################
@@ -1597,136 +2043,61 @@ if ! mount_bind "/run/host/usr/share/fonts" "/usr/local/share/fonts"; then
 fi
 ###############################################################################
 
-###############################################################################
-if [ "${init}" -eq 0 ]; then
-	printf "distrobox: Setting up package manager exceptions...\n"
-fi
-
-# In case of an RPM distro, we can specify that our bind_mount directories
-# are in fact net shares. This prevents conflicts during package installations.
-if [ -d "/usr/lib/rpm/macros.d/" ] && [ "${init}" -eq 0 ]; then
-	printf "distrobox: Setting up rpm exceptions...\n"
-	# Loop through all the environment vars
-	# and export them to the container.
-	net_mounts=""
-	for net_mount in \
-		${HOST_MOUNTS_RO} ${HOST_MOUNTS} \
-		'/dev' '/proc' '/sys' '/tmp' \
-		'/etc/hosts' '/etc/resolv.conf'; do
-
-		net_mounts="${net_mount}:${net_mounts}"
-	done
-	net_mounts=${net_mounts%?}
-	cat << EOF > /usr/lib/rpm/macros.d/macros.distrobox
-%_netsharedpath ${net_mounts}
-EOF
-fi
-
-if { [ -d "/etc/dpkg/dpkg.cfg.d/" ] || [ -d "/usr/share/libalpm/scripts" ]; } && [ "${init}" -eq 0 ]; then
-	cat << EOF > /etc/distrobox-pre-hook.sh
-#!/bin/sh
-mounts="${HOST_MOUNTS_RO_INIT}"
-for mount in \$mounts; do
-	if findmnt \$mount >/dev/null; then
-		umount -l \$mount
-	fi
-done
-EOF
-	cat << EOF > /etc/distrobox-post-hook.sh
-#!/bin/sh
-mounts="${HOST_MOUNTS_RO_INIT}"
-for mount in \$mounts; do
-	if [ -e /run/host/\$mount ] || [ -e /run/host/\$(readlink -fm /run/host/\$mount) ]; then
-		if [ ! -d /run/host/\$mount ]; then
-			rm -f \$mount && touch \$mount
-		fi
-		if ! mount --rbind \$(readlink -fm /run/host/\$mount) \$mount; then
-			mount --rbind /run/host/\$(readlink -fm /run/host/\$mount) \$mount
-		fi
-	fi
-done
-EOF
-	chmod +x /etc/distrobox-pre-hook.sh /etc/distrobox-post-hook.sh
-fi
-
-# In case of an DEB distro, we can specify that our bind_mount directories
-# have to be ignored. This prevents conflicts during package installations.
-if [ -d "/etc/dpkg/dpkg.cfg.d/" ] && [ "${init}" -eq 0 ]; then
-	# Loop through all the environment vars
-	# and export them to the container.
-	printf "distrobox: Setting up dpkg exceptions...\n"
-	printf "" > /etc/dpkg/dpkg.cfg.d/00_distrobox
-	for net_mount in ${HOST_MOUNTS_RO} ${HOST_MOUNTS}; do
-		printf "path-exclude %s/*\n" "${net_mount}" >> /etc/dpkg/dpkg.cfg.d/00_distrobox
-	done
-
-	# Also we put a hook to clear some critical paths that do not play well
-	# with read only filesystems, like Systemd.
-	if [ -d "/etc/apt/apt.conf.d/" ]; then
-		printf "distrobox: Setting up apt hooks...\n"
-		printf 'DPkg::Pre-Invoke {/etc/distrobox-pre-hook.sh};\n' > /etc/apt/apt.conf.d/00_distrobox
-		printf 'DPkg::Post-Invoke {/etc/distrobox-post-hook.sh};\n' >> /etc/apt/apt.conf.d/00_distrobox
-	fi
-fi
-
-# Workarounds for pacman. We need to exclude the paths by using a pre-hook to umount them and a
-# post-hook to remount them. Additionally we neutralize the systemd-post-hooks as they do not
-# work on a rootless container system.
-if [ -d "/usr/share/libalpm/scripts" ] && [ "${init}" -eq 0 ]; then
-	printf "distrobox: Setting up pacman exceptions...\n"
-
-	# in case we're not using an init image, neutralize systemd post installation hooks
-	# so that we do not encounter problems along the way.
-	# This will be removed if we're using --init.
-	cat << EOF >> /usr/share/libalpm/scripts/distrobox_post_hook.sh
-#!/bin/sh
-echo -e '#!/bin/sh\nexit 0' > /usr/share/libalpm/scripts/systemd-hook;
-EOF
-	chmod +x /usr/share/libalpm/scripts/distrobox_post_hook.sh
-
-	# create hooks files for them
-	printf "distrobox: Setting up pacman hooks...\n"
-	find /usr/share/libalpm/hooks/*distrobox* -delete || :
-	for hook in /etc/distrobox-pre-hook.sh /etc/distrobox-post-hook.sh /usr/share/libalpm/scripts/distrobox_post_hook.sh; do
-		when="PostTransaction"
-		[ -z "${hook##*pre*}" ] && when="PreTransaction"
-		cat << EOF > "/usr/share/libalpm/hooks/$(basename "${hook}").hook"
-[Trigger]
-Operation = Install
-Operation = Upgrade
-Type = Package
-Target = *
-[Action]
-Description = Distrobox hook ${hook}...
-When = ${when}
-Exec = ${hook}
-EOF
-	done
-fi
-###############################################################################
-
-###############################################################################
-printf  "distrobox: Setting up distrobox profile...\n"
+printf "distrobox: Setting up distrobox profile...\n"
 
 # This ensures compatibility with prompts and tools between toolbx and distrobox
 touch /run/.toolboxenv
 
-# If we do not have profile files in the home, we should copy the
-# skeleton files, if present.
-# Ensure we copy only if the dotfile is not already present.
-mkdir -p /etc/profile.d
+# Ensure we have some basic env variables and prompt as base if /etc/profile.d is missing
+if [ ! -d /etc/profile.d ]; then
+	rcfiles="
+		/etc/profile
+		/etc/bash.bashrc
+		/etc/bashrc
+		/etc/zshrc
+	"
+	for rcfile in ${rcfiles}; do
+		if [ -e "${rcfile}" ] && ! grep -q 'distrobox_profile.sh' "${rcfile}"; then
+			echo "[ -e /etc/profile.d/distrobox_profile.sh ] && . /etc/profile.d/distrobox_profile.sh" >> "${rcfile}"
+		fi
+	done
+	mkdir -p /etc/profile.d
+fi
 cat << EOF > /etc/profile.d/distrobox_profile.sh
-test -z "\$USER" && USER="\$(id -un 2> /dev/null)"
-test -z "\$UID"  && readonly  UID="\$(id -ur 2> /dev/null)"
+test -z "\$USER" && export USER="\$(id -un 2> /dev/null)"
+test -z "\$UID"  && readonly UID="\$(id -ur 2> /dev/null)"
 test -z "\$EUID" && readonly EUID="\$(id -u  2> /dev/null)"
 export SHELL="\$(getent passwd "\${USER}" | cut -f 7 -d :)"
+
+test -z "\${XDG_RUNTIME_DIR:-}" && export XDG_RUNTIME_DIR="/run/user/\$(id -ru)"
+test -z "\${DBUS_SESSION_BUS_ADDRESS:-}" && export DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/\$(id -ru)/bus"
+
+# Ensure we have these two variables from the host, so that graphical apps
+# also work in case we use a login session
+if [ -z "\$XAUTHORITY" ]; then
+    export XAUTHORITY="\$(host-spawn sh -c "printf "%s" \\\$XAUTHORITY")"
+    # if the variable is still empty, unset it, because empty it could be harmful
+    [ -z "\$XAUTHORITY" ] && unset XAUTHORITY
+fi
+if [ -z "\$XAUTHLOCALHOSTNAME" ]; then
+    export XAUTHLOCALHOSTNAME="\$(host-spawn sh -c "printf "%s" \\\$XAUTHLOCALHOSTNAME")"
+    [ -z "\$XAUTHLOCALHOSTNAME" ] && unset XAUTHLOCALHOSTNAME
+fi
+if [ -z "\$WAYLAND_DISPLAY" ]; then
+    export WAYLAND_DISPLAY="\$(host-spawn sh -c "printf "%s" \\\$WAYLAND_DISPLAY")"
+    [ -z "\$WAYLAND_DISPLAY" ] && unset WAYLAND_DISPLAY
+fi
+if [ -z "\$DISPLAY" ]; then
+    export DISPLAY="\$(host-spawn sh -c "printf "%s" \\\$DISPLAY")"
+    [ -z "\$DISPLAY" ] && unset DISPLAY
+fi
 
 # This will ensure a default prompt for a container, this will be remineshent of
 # toolbx prompt: https://github.com/containers/toolbox/blob/main/profile.d/toolbox.sh#L47
 # this will ensure greater compatibility between the two implementations
 if [ -f /run/.toolboxenv ]; then
-    [ "\${BASH_VERSION:-}" != "" ] && PS1="📦[\u@\h \W]\$ "
-    [ "\${ZSH_VERSION:-}" != "" ] && PS1="📦[%n@%m]%~%# "
+    [ "\${BASH_VERSION:-}" != "" ] && export PS1="📦[\u@\$CONTAINER_ID \W]\$ "
+    [ "\${ZSH_VERSION:-}" != "" ] && export PS1="📦[%n@\$CONTAINER_ID]%~%# "
 fi
 
 # This will ensure we have a first-shell password setup for an user if needed.
@@ -1741,28 +2112,57 @@ EOF
 
 # It's also importanto to keep this working on fish shells
 if [ -e "/etc/fish/config.fish" ]; then
-	cat << EOF >> /etc/fish/conf.d/config.fish
-test -z "\$USER" && set -Ux USER "\$(id -un 2> /dev/null)"
-test -z "\$UID"  && set -Ux UID "\$(id -ur 2> /dev/null)"
-test -z "\$EUID" && set -Ux EUID "\$(id -u  2> /dev/null)"
-test -z "\$MARONNE" && set -Ux MARONNE "\$(id -u  2> /dev/null)"
-set -Ux SHELL "\$(getent passwd "\$USER" | cut -f 7 -d :)"
+	mkdir -p /etc/fish/conf.d
+	cat << EOF > /etc/fish/conf.d/distrobox_config.fish
+if status --is-interactive
+	test -z "\$USER" && set -gx USER (id -un 2> /dev/null)
+	test -z "\$UID"  && set -gx UID (id -ur 2> /dev/null)
+	test -z "\$EUID" && set -gx EUID (id -u  2> /dev/null)
+	set -gx SHELL (getent passwd "\$USER" | cut -f 7 -d :)
 
-# This will ensure we have a first-shell password setup for an user if needed.
-# We're going to use this later in case of rootful containers
-if test -e /var/tmp/.\$USER.passwd.initialize
-	echo "⚠️  First time user password setup ⚠️ "
-	trap "echo; exit" INT
-	passwd && rm -f /var/tmp/.\$USER.passwd.initialize
-	trap - INT
+	test -z "\$XDG_RUNTIME_DIR && set -gx XDG_RUNTIME_DIR /run/user/(id -ru)
+	test -z "\$DBUS_SESSION_BUS_ADDRESS && set -gx DBUS_SESSION_BUS_ADDRESS unix:path=/run/user/(id -ru)/bus
+
+	# Ensure we have these two variables from the host, so that graphical apps
+	# also work in case we use a login session
+	if test -z \$XAUTHORITY
+		set -gx XAUTHORITY (host-spawn sh -c "printf "%s" \\\$XAUTHORITY")
+		# if the variable is still empty, unset it, because empty it could be harmful
+		test -z \$XAUTHORITY ; and set -e XAUTHORITY
+	end
+	if test -z \$XAUTHLOCALHOSTNAME
+		set -gx XAUTHLOCALHOSTNAME (host-spawn sh -c "printf "%s" \\\$XAUTHLOCALHOSTNAME")
+		test -z \$XAUTHLOCALHOSTNAME ; and set -e XAUTHLOCALHOSTNAME
+	end
+	if test -z \$WAYLAND_DISPLAY
+		set -gx WAYLAND_DISPLAY (host-spawn sh -c "printf "%s" \\\$WAYLAND_DISPLAY")
+		test -z \$WAYLAND_DISPLAY ; and set -e WAYLAND_DISPLAY
+	end
+	if test -z \$DISPLAY
+		set -gx DISPLAY (host-spawn sh -c "printf "%s" \\\$DISPLAY")
+		test -z \$DISPLAY ; and set -e DISPLAY
+	end
+
+	# This will ensure we have a first-shell password setup for an user if needed.
+	# We're going to use this later in case of rootful containers
+	if test -e /var/tmp/.\$USER.passwd.initialize
+		echo "⚠️  First time user password setup ⚠️ "
+		trap "echo; exit" INT
+		passwd && rm -f /var/tmp/.\$USER.passwd.initialize
+		trap - INT
+	end
+	function fish_prompt
+		set current_dir (basename (pwd))
+		echo "📦[\$USER@\$CONTAINER_ID \$current_dir]> "
+	end
 end
 EOF
 fi
 ###############################################################################
 
 ###############################################################################
-printf  "distrobox: Setting up sudo...\n"
-mkdir  -p /etc/sudoers.d
+printf "distrobox: Setting up sudo...\n"
+mkdir -p /etc/sudoers.d
 # Ensure we're using the user's password for sudo, not root
 if [ -e /etc/sudoers ]; then
 	sed -i "s|^Defaults targetpw.*||g" /etc/sudoers
@@ -1771,11 +2171,28 @@ fi
 # Do not check fqdn when doing sudo, it will not work anyways
 # Also allow canonical groups to use sudo
 cat << EOF > /etc/sudoers.d/sudoers
+Defaults !targetpw
 Defaults !fqdn
 %wheel ALL=(ALL:ALL) ALL
 %sudo ALL=(ALL:ALL) ALL
 %root ALL=(ALL:ALL) ALL
 EOF
+
+# PAM config for "su" command
+if [ ! -e /etc/pam.d/su ]; then
+	mkdir -p /etc/pam.d
+	cat << EOF > /etc/pam.d/su
+auth            sufficient      pam_rootok.so
+auth            required        pam_unix.so
+account	        required        pam_unix.so
+session         required        pam_unix.so
+-session        optional        pam_systemd.so
+EOF
+fi
+
+if ! grep -q "pam_systemd.so" /etc/pam.d/su; then
+	printf "%s" '-session   optional   pam_systemd.so' >> /etc/pam.d/su
+fi
 
 # If we're running this script as root in a login shell (sudoless), we don't
 # have to bother setting up sudo.
@@ -1789,9 +2206,10 @@ fi
 ###############################################################################
 
 ###############################################################################
-printf "distrobox: Setting up groups...\n"
 # If not existing, ensure we have a group for our user.
 if ! grep -q "^${container_user_name}:" /etc/group; then
+	printf "distrobox: Setting up user groups...\n"
+
 	if ! groupadd --force --gid "${container_user_gid}" "${container_user_name}"; then
 		# It may occur that we have users with unsupported user name (eg. on LDAP or AD)
 		# So let's try and force the group creation this way.
@@ -1801,12 +2219,13 @@ fi
 ###############################################################################
 
 ###############################################################################
-printf "distrobox: Setting up users...\n"
 
 # Setup kerberos integration with the host
 if [ -d "/run/host/var/kerberos" ] &&
 	[ -d "/etc/krb5.conf.d" ] &&
 	[ ! -e "/etc/krb5.conf.d/kcm_default_ccache" ]; then
+
+	printf "distrobox: Setting up kerberos integration...\n"
 
 	cat << EOF > /etc/krb5.conf.d/kcm_default_ccache
 # # To disable the KCM credential cache, comment out the following lines.
@@ -1815,6 +2234,7 @@ if [ -d "/run/host/var/kerberos" ] &&
 EOF
 fi
 
+printf "distrobox: Setting up user's group list...\n"
 # If we have sudo/wheel groups, let's add the user to them.
 # and ensure that user's in those groups can effectively sudo
 additional_groups=""
@@ -1843,6 +2263,7 @@ fi
 # shellcheck disable=SC1003
 if ! grep -q "^$(printf '%s' "${container_user_name}" | tr '\\' '.'):" /etc/passwd &&
 	! getent passwd "${container_user_uid}"; then
+	printf "distrobox: Adding user...\n"
 	if ! useradd \
 		--home-dir "${container_user_home}" \
 		--no-create-home \
@@ -1852,7 +2273,7 @@ if ! grep -q "^$(printf '%s' "${container_user_name}" | tr '\\' '.'):" /etc/pass
 		--gid "${container_user_gid}" \
 		"${container_user_name}"; then
 
-		printf "There was a problem setting up the user with usermod, trying manual addition\n"
+		printf "Warning: There was a problem setting up the user with usermod, trying manual addition\n"
 
 		printf "%s:x:%s:%s:%s:%s:%s" \
 			"${container_user_name}" "${container_user_uid}" \
@@ -1873,6 +2294,7 @@ elif [ ! -e /etc/passwd.done ]; then
 		user_to_modify=$(getent passwd "${container_user_uid}" | cut -d: -f1)
 	fi
 
+	printf "distrobox: Setting up existing user...\n"
 	if ! usermod \
 		--home "${container_user_home}" \
 		--shell "${SHELL:-"/bin/bash"}" \
@@ -1882,9 +2304,10 @@ elif [ ! -e /etc/passwd.done ]; then
 		--login "${container_user_name}" \
 		"${user_to_modify:-"${container_user_name}"}"; then
 
-		printf "There was a problem setting up the user with usermod, trying manual addition\n"
+		printf "Warning: There was a problem setting up the user with usermod, trying manual addition\n"
 
 		# Modify the user
+		printf "distrobox: Setting up existing user: /etc/passwd...\n"
 		sed -i "s|^${container_user_name}.*||g" /etc/passwd
 		printf "%s:x:%s:%s:%s:%s:%s" \
 			"${container_user_name}" "${container_user_uid}" \
@@ -1893,6 +2316,7 @@ elif [ ! -e /etc/passwd.done ]; then
 
 		# Add or modify the default group
 		# and add or modify the additional groups
+		printf "distrobox: Setting up existing user: /etc/group...\n"
 		for group in ${container_user_name} ${additional_groups}; do
 			# Check if we have the user in the group
 			if ! grep -q "^${group}.*${container_user_name}.*" /etc/group; then
@@ -1910,21 +2334,39 @@ fi
 
 # Ensure we have our home correctly set, in case of cloned containers or whatnot
 if [ "$(getent passwd "${container_user_name}" | cut -d: -f6)" != "${container_user_home}" ]; then
+	printf "distrobox: Setting up user home...\n"
+
 	if ! usermod -d "${container_user_home}" "${container_user_name}"; then
 		sed -i "s|^${container_user_name}.*|${container_user_name}:x:${container_user_uid}:${container_user_gid}::${container_user_home}:${SHELL:-"/bin/bash"}|g" /etc/passwd
 	fi
 fi
 
 # If we're rootless, delete password for root and user
-if  [ ! -e /etc/passwd.done ]; then
-	temporary_password="$(cat /proc/sys/kernel/random/uuid)"
+if [ ! -e /etc/passwd.done ]; then
+	printf "distrobox: Ensuring user's access...\n"
+
+	temporary_password="$(md5sum < /proc/sys/kernel/random/uuid | cut -d' ' -f1)"
 	# We generate a random password to initialize the entry for the user.
-	printf "%s:%s" "${container_user_name}" "${temporary_password}" | chpasswd -e
-	printf "%s:" "${container_user_name}" | chpasswd -e
+	chpasswd_failed=0
+	printf "%s:%s" "${container_user_name}" "${temporary_password}" | chpasswd -e || chpasswd_failed=1
+	printf "%s:" "${container_user_name}" | chpasswd -e || chpasswd_failed=1
+
+	if [ "${chpasswd_failed}" -eq 1 ]; then
+		printf "Warning: There was a problem setting up the user, trying manual addition\n"
+		if grep -q "${container_user_name}" /etc/shadow; then
+			sed -i "s|^${container_user_name}.*|${container_user_name}::::::::|g" /etc/shadow
+		else
+			echo "${container_user_name}::::::::" >> /etc/shadow
+		fi
+	fi
 
 	if [ "${rootful}" -eq 0 ]; then
 		# We're rootless so we don't care about account password, so we remove it
-		printf "%s\n%s\n" "${temporary_password}" "${temporary_password}" | passwd root
+		passwd_cmd=passwd
+		if passwd --help 2>&1 | grep -q -- --stdin; then
+			passwd_cmd="passwd --stdin"
+		fi
+		printf "%s\n%s\n" "${temporary_password}" "${temporary_password}" | ${passwd_cmd} root
 		printf "%s:" "root" | chpasswd -e
 	else
 		# We're rootful, so we don't want passwordless accounts, so we lock them
@@ -1958,13 +2400,16 @@ if [ "${rootful}" -eq 1 ] &&
 fi
 
 # Now we're done
-touch  /etc/passwd.done
+touch /etc/passwd.done
 ###############################################################################
 
 ###############################################################################
-printf "distrobox: Setting up skel...\n"
-
 if [ -n "${DISTROBOX_HOST_HOME-}" ] && [ -d "/etc/skel" ]; then
+	printf "distrobox: Setting up skel...\n"
+
+	# If we do not have profile files in the home, we should copy the
+	# skeleton files, if present.
+	# Ensure we copy only if the dotfile is not already present.
 	skel_files="$(find /etc/skel/ -type f || :)"
 	for skel_file in ${skel_files}; do
 		base_file_name=$(basename "${skel_file}")
@@ -1974,14 +2419,15 @@ if [ -n "${DISTROBOX_HOST_HOME-}" ] && [ -d "/etc/skel" ]; then
 		if [ -n "${file_path_for_home}" ] &&
 			[ ! -d "${container_user_home}/${file_path_for_home:+"${file_path_for_home}"}" ]; then
 			mkdir -p "${container_user_home}/${file_path_for_home:+"${file_path_for_home}"/}"
+			chown "${container_user_uid}":"${container_user_gid}" "${container_user_home}/${file_path_for_home:+"${file_path_for_home}"/}"
 		fi
 
 		if [ ! -f "${container_user_home}/${file_path_for_home:+"${file_path_for_home}"/}${base_file_name}" ] &&
 			[ ! -L "${container_user_home}/${file_path_for_home:+"${file_path_for_home}"/}${base_file_name}" ]; then
 			cp "${skel_file}" "${container_user_home}/${file_path_for_home:+"${file_path_for_home}"/}${base_file_name}"
-			chown "${container_user_uid}":"${container_user_gid}" \
-				"${container_user_home}/${file_path_for_home:+"${file_path_for_home}"/}${base_file_name}"
+			chown "${container_user_uid}":"${container_user_gid}" "${container_user_home}/${file_path_for_home:+"${file_path_for_home}"/}${base_file_name}"
 		fi
+
 	done
 fi
 ###############################################################################
@@ -1995,6 +2441,21 @@ if [ -n "${init_hook}" ]; then
 fi
 ###############################################################################
 
+HOST_WATCH="
+	/etc/hostname
+	/etc/hosts
+	/etc/localtime
+	/etc/resolv.conf
+"
+id="${CONTAINER_ID:-}"
+if [ -e /run/.containerenv ]; then
+	# shellcheck disable=SC1091,SC2034
+	. /run/.containerenv
+elif [ -e /.dockerenv ]; then
+	id="$(curl -s --unix-socket /run/docker.sock http://docker/containers/"${CONTAINER_ID:-$(hostname | cut -d'.' -f1)}"/json |
+		grep -Eo '"Id":"[a-zA-Z0-9]{64}",' | cut -d '"' -f4)"
+fi
+
 ###############################################################################
 # If init support is disabled, let's do our routine to keep the container
 # up, running and in sync with host.
@@ -2003,11 +2464,6 @@ fi
 if [ "${init}" -eq 0 ]; then
 	printf "container_setup_done\n"
 	# Keepalive loop
-	HOST_WATCH="
-		/etc/hosts
-		/etc/localtime
-		/etc/resolv.conf
-	"
 	# disable verbose logging for this phase.
 	set +x
 	while true; do
@@ -2017,8 +2473,12 @@ if [ "${init}" -eq 0 ]; then
 		#	- symlink will fail with "Device or Resource busy"
 		#	- bindmount will need a container restart on changes
 		for file_watch in ${HOST_WATCH}; do
-			# do stuff, only if we need to.
-			if [ "$(findmnt -no FSTYPE "${file_watch}")" = "overlay" ]; then
+			# do stuff, only if the file is a mountpoint, and if the mountpoint is NOT containing the
+			# container id, because if it does, it is because it's part of the podman/docker setup
+			# The mount point might not exist, either because it's umounted or it doesn't exist on
+			# host in some cases like /etc/localtime, so ignore findmnt errors
+			mount_source="$(findmnt -no SOURCE "${file_watch}")" || :
+			if [ -n "${mount_source}" ] && ! echo "${mount_source}" | grep -q "${id}"; then
 				file_watch_src="/run/host${file_watch}"
 				# check if the target file exists
 				if ls -l "${file_watch_src}" 2> /dev/null > /dev/null; then
@@ -2034,6 +2494,11 @@ if [ "${init}" -eq 0 ]; then
 						# We only do this, if the file is actually different
 						umount "${file_watch}" &&
 							mount_bind "${file_watch_src}" "${file_watch}"
+
+						# Let's keep in sync host's hostname and container's hostname
+						if [ "${file_watch}" = "/etc/hostname" ]; then
+							hostname "$(cat /etc/hostname)"
+						fi
 					fi
 				fi
 			fi
@@ -2071,16 +2536,16 @@ fi
 # Instantiate a new pty to mount over /dev/console
 # this way we will have init output right of the logs
 [ -e /dev/console ] || touch /dev/console
-rm  -f /var/console
-mkfifo  /var/console
-script  -c "cat /var/console" /dev/null &
+rm -f /var/console
+mkfifo /var/console
+script -c "cat /var/console" /dev/null &
 
 # Ensure the pty is created
-sleep  0.5
+sleep 0.5
 
 # Mount the created pty over /dev/console in order to have systemd logs
 # right into container logs
-if  ! mount --bind /dev/pts/0 /dev/console; then
+if ! mount --bind /dev/pts/0 /dev/console; then
 	# Fallback to older behaviour or fake plaintext file in case it fails
 	# this ensures rootful + initful boxes do not interfere with host's /dev/console
 	rm -f /var/console
@@ -2121,10 +2586,25 @@ if command -v systemctl 2> /dev/null; then
 		/usr/lib/systemd/system/systemd-binfmt.service
 		/usr/lib/systemd/system/systemd-tmpfiles*
 		/usr/lib/systemd/system/systemd-udevd.service
+		/usr/lib/systemd/system/systemd-udev-trigger.service
 		/usr/lib/systemd/system/systemd-update-utmp*
 		/usr/lib/systemd/user/pipewire*
 		/usr/lib/systemd/user/wireplumber*
+		/usr/lib/systemd/system/suspend.target
+		/usr/lib/systemd/system/hibernate.target
+		/usr/lib/systemd/system/hybrid-sleep.target
 	"
+
+	# in case /etc/resolv.conf is a mount, we need to mask resolved
+	# in this case we're using network=host and systemd-resolved won't
+	# be able to bind to localhost:53
+	mount_source="$(findmnt -no SOURCE /etc/resolv.conf)" || :
+	if [ -n "${mount_source}" ] && ! echo "${mount_source}" | grep -q "${id}"; then
+		UNIT_TARGETS="${UNIT_TARGETS}
+			/usr/lib/systemd/system/systemd-resolved.service
+		"
+	fi
+
 	# shellcheck disable=SC2086,SC2044
 	for unit in $(find ${UNIT_TARGETS} 2> /dev/null); do
 		systemctl mask "$(basename "${unit}")" || :
@@ -2137,6 +2617,25 @@ fi
 #
 # This will ensure the basic integration for x11/wayland/pipewire/keyring
 if [ -e /usr/lib/systemd/system/user@.service ]; then
+	cat << EOF > /usr/local/bin/user-integration
+#!/bin/sh
+sleep 1
+ln -sf /run/host/run/user/\$(id -ru)/wayland-* /run/user/\$(id -ru)/
+ln -sf /run/host/run/user/\$(id -ru)/pipewire-* /run/user/\$(id -ru)/
+find /run/host/run/user/\$(id -ru)/ -maxdepth 1 -type f -exec sh -c 'grep -qlE COOKIE \$0 && ln -sf \$0 /run/user/\$(id -ru)/\$(basename \$0)' {} \;
+mkdir -p /run/user/\$(id -ru)/app && ln -sf /run/host/run/user/\$(id -ru)/app/* /run/user/\$(id -ru)/app/
+mkdir -p /run/user/\$(id -ru)/at-spi && ln -sf /run/host/run/user/\$(id -ru)/at-spi/* /run/user/\$(id -ru)/at-spi/
+mkdir -p /run/user/\$(id -ru)/dbus-1 && ln -sf /run/host/run/user/\$(id -ru)/dbus-1/* /run/user/\$(id -ru)/dbus-1/
+mkdir -p /run/user/\$(id -ru)/dconf && ln -sf /run/host/run/user/\$(id -ru)/dconf/* /run/user/\$(id -ru)/dconf/
+mkdir -p /run/user/\$(id -ru)/gnupg && ln -sf /run/host/run/user/\$(id -ru)/gnupg/* /run/user/\$(id -ru)/gnupg/
+mkdir -p /run/user/\$(id -ru)/keyring && ln -sf /run/host/run/user/\$(id -ru)/keyring/* /run/user/\$(id -ru)/keyring/
+mkdir -p /run/user/\$(id -ru)/p11-kit && ln -sf /run/host/run/user/\$(id -ru)/p11-kit/* /run/user/\$(id -ru)/p11-kit/
+mkdir -p /run/user/\$(id -ru)/pulse && ln -sf /run/host/run/user/\$(id -ru)/pulse/* /run/user/\$(id -ru)/pulse/
+find /run/user/\$(id -ru) -maxdepth 2 -xtype l -delete
+EOF
+
+	chmod +x /usr/local/bin/user-integration
+
 	cat << EOF > /usr/lib/systemd/system/user-integration@.service
 [Unit]
 Description=User runtime integration for UID %i
@@ -2146,19 +2645,7 @@ Requires=user-runtime-dir@%i.service
 [Service]
 User=%i
 Type=oneshot
-ExecStart=/bin/sh -c "sleep 1; \
-	ln -sf /run/host/run/user/\$(id -ru)/wayland-* /run/user/\$(id -ru)/ ; \
-	ln -sf /run/host/run/user/\$(id -ru)/pipewire-* /run/user/\$(id -ru)/ ; \
-	for f in \$(find /run/host/run/user/\$(id -ru)/ -maxdepth 1 -type f -exec grep -lE 'ICE|COOKIE' {} \;); do ln -sf \$f /run/user/\$(id -ru)/\$(basename \$f) ; done ; \
-	mkdir -p /run/user/\$(id -ru)/app && ln -sf /run/host/run/user/\$(id -ru)/app/* /run/user/\$(id -ru)/app/ ; \
-	mkdir -p /run/user/\$(id -ru)/at-spi && ln -sf /run/host/run/user/\$(id -ru)/at-spi/* /run/user/\$(id -ru)/at-spi/ ; \
-	mkdir -p /run/user/\$(id -ru)/dbus-1 && ln -sf /run/host/run/user/\$(id -ru)/dbus-1/* /run/user/\$(id -ru)/dbus-1/ ; \
-	mkdir -p /run/user/\$(id -ru)/dconf && ln -sf /run/host/run/user/\$(id -ru)/dconf/* /run/user/\$(id -ru)/dconf/ ; \
-	mkdir -p /run/user/\$(id -ru)/gnupg && ln -sf /run/host/run/user/\$(id -ru)/gnupg/* /run/user/\$(id -ru)/gnupg/ ; \
-	mkdir -p /run/user/\$(id -ru)/keyring && ln -sf /run/host/run/user/\$(id -ru)/keyring/* /run/user/\$(id -ru)/keyring/ ; \
-	mkdir -p /run/user/\$(id -ru)/p11-kit && ln -sf /run/host/run/user/\$(id -ru)/p11-kit/* /run/user/\$(id -ru)/p11-kit/ ; \
-	mkdir -p /run/user/\$(id -ru)/pulse && ln -sf /run/host/run/user/\$(id -ru)/pulse/* /run/user/\$(id -ru)/pulse/ ; \
-	find /run/user/\$(id -ru) -maxdepth 2 -xtype l -delete"
+ExecStart=/usr/local/bin/user-integration
 
 Slice=user-%i.slice
 EOF
@@ -2168,18 +2655,19 @@ fi
 printf "distrobox: Firing up init system...\n"
 
 if [ -e /usr/lib/systemd/systemd ] || [ -e /lib/systemd/systemd ]; then
-	printf "container_setup_done\n"
-
 	# Start user Systemd unit, this will attempt until Systemd is ready
-	sh -c "while true; do \
-		sleep 1; \
-		systemctl start user@${container_user_name}.service 2>/dev/null && \
-		systemctl start user-integration@${container_user_name}.service 2>/dev/null && \
-		exit 0; \
-	done" &
+	sh -c "timeout=120 && sleep 1 && while [ \"\${timeout}\" -gt 0 ]; do \
+	    systemctl is-system-running | grep -E 'running|degraded' && break; \
+		echo 'waiting for systemd to come up...\n' && sleep 1 && timeout=\$(( timeout -1 )); \
+	done && \
+	systemctl start user@${container_user_name}.service && \
+	systemctl start user-integration@${container_user_name}.service && \
+	loginctl enable-linger ${container_user_name} || : && \
+	echo container_setup_done" &
 
 	[ -e /usr/lib/systemd/systemd ] && exec /usr/lib/systemd/systemd --system --log-target=console --unit=multi-user.target
 	[ -e /lib/systemd/systemd ] && exec /lib/systemd/systemd --system --log-target=console --unit=multi-user.target
+
 elif [ -e /sbin/init ]; then
 	printf "container_setup_done\n"
 

@@ -56,10 +56,13 @@ it without problems.
 Alternatively you may want to install VSCode on your host. We will explore how
 to integrate VSCode installed via **Flatpak** with Distrobox.
 
+For this one you'll need to use VSCode from Microsoft, and not VSCodium, in order
+to have access to the remote containers extension.
+
 ### First step install it
 
 ```shell
-~$ flatpak install --user app/com.visualstudio.code
+~$ flatpak install --user app/com.visualstudio.code 
 ```
 
 ### Second step, extensions
@@ -70,35 +73,36 @@ Now we want to install VSCode [Dev Containers extension](https://marketplace.vis
 
 ### Third step podman wrapper
 
-Being in a Flatpak, we will need access to host's `podman` (or `docker`) to be
+Being in a Flatpak, we will need access to host's `podman` to be
 able to use the containers. Place this in your `~/.local/bin/podman-host`
+In case of access to host's `docker` to be
+able to use the containers, use `~/.local/bin/docker-host`
+
+For podman:
 
 ```shell
-#!/bin/bash
-set -x
-
-# This little workaround is used to ensure
-# we use our $USER inside the containers, without
-# resorting to creating devcontainer.json or similar stuff
-arr=("$@")
-for i in "${!arr[@]}"; do
-    if [[ ${arr[$i]} == *"root:root"* ]]; then
-        arr[$i]="$(echo "${arr[$i]}" | sed "s|root:root|$USER:$USER|g")"
-    fi
-done
-
-flatpak-spawn --host podman "${arr[@]}"
+curl -s https://raw.githubusercontent.com/89luca89/distrobox/main/extras/podman-host -o ~/.local/bin/podman-host
+chmod +x ~/.local/bin/podman-host
 ```
 
-and make it executable: `chmod +x ~/.local/bin/podman-host`.
+For docker:
+
+```shell
+curl -s https://raw.githubusercontent.com/89luca89/distrobox/main/extras/docker-host -o ~/.local/bin/docker-host
+chmod +x ~/.local/bin/docker-host
+```
 
 Open VSCode settings (Ctrl+,) and head to `Remote>Containers>Docker Path` and
-set it to the path of `podman-host`, like in the example
+set it to the path of `/home/<your-user>/.local/bin/podman-host` (or docker-host in case of docker), like in the example
 
 ![image](https://user-images.githubusercontent.com/598882/149208525-5ad630c9-fcbc-4ee6-9d77-e50d2c782a56.png)
 
 This will give a way to execute host's container manager from within the
 flatpak app.
+
+**This works for Distrobox both inside and outside a flatpak**
+This will act only for containers created with Distrobox, you can still use regular devcontainers
+without transparently if needed.
 
 ## Final Result
 
@@ -113,3 +117,17 @@ And let's choose our Distrobox
 And we're good to go! We have our VSCode remote session inside our Distrobox container!
 
 ![image](https://user-images.githubusercontent.com/598882/149210881-749a8146-c69d-4382-bbef-91e4b477b7ba.png)
+
+# Open VSCode directly attached to our Distrobox
+
+You may want to instead have a more direct way to launch your VSCode when you're already in your project directory,
+in this case you can use `vscode-distrobox` script:
+
+```shell
+curl -s https://raw.githubusercontent.com/89luca89/distrobox/main/extras/vscode-distrobox -o ~/.local/bin/vscode-distrobox
+chmod +x ~/.local/bin/vscode-distrobox
+```
+
+This will make it easy to launch VSCode attached to target distrobox, on a target path:
+
+`vscode-distrobox my-distrobox /path/to/project`

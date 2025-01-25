@@ -44,7 +44,7 @@ _generate_from_help() {
 		[[ ${command} != *"list"* ]] && [[ ${command} != *"assemble"* ]]; then
 		while IFS= read -r line; do
 			list+="$line "
-		done < <(distrobox-list --no-color | tail -n+2 | awk '{print $3}')
+		done < <(distrobox-list --no-color | tail -n+2 | cut -d'|' -f2)
 		COMPREPLY=($(compgen -W "${list}" "${cur}"))
 		return 0
 	fi
@@ -52,7 +52,9 @@ _generate_from_help() {
 
 __distrobox() {
 	if [ "${#COMP_WORDS[@]}" == "2" ]; then
-		COMPREPLY=($(compgen -W "$(distrobox | tail -n+4 | xargs echo)" "${COMP_WORDS[1]}"))
+		VALID_WORDS=$(distrobox | tail -n+4 | tr -d '|' | xargs echo)
+		VALID_WORDS+=" --version --help"
+		COMPREPLY=($(compgen -W "${VALID_WORDS}" -- "${COMP_WORDS[1]}"))
 	elif [ "${#COMP_WORDS[@]}" -gt "2" ]; then
 		_generate_from_help distrobox-"${COMP_WORDS[1]}"
 	fi

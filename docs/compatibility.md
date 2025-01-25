@@ -50,7 +50,7 @@ Distrobox has been successfully tested on:
 |    Distro  |    Version    | Notes |
 | --- | --- | --- |
 | Alpine Linux | | To setup rootless podman, look [HERE](https://wiki.alpinelinux.org/wiki/Podman) |
-| Arch Linux | | `distrobox` and `distrobox-git` are available in AUR (thanks [M0Rf30](https://github.com/M0Rf30)!). <br> To setup rootless podman, look [HERE](https://wiki.archlinux.org/title/Podman) |
+| Arch Linux | | `distrobox` is available in the `extra` repository and `distrobox-git` is available in the AUR (thanks [M0Rf30](https://github.com/M0Rf30)!). <br> To setup rootless podman, look [HERE](https://wiki.archlinux.org/title/Podman) |
 | Bazzite | 38 | `distrobox-git` is preinstalled. |
 | CentOS | 8 <br> 8 Stream <br> 9 Stream | `distrobox` is available in epel repos. (thanks [alcir](https://github.com/alcir)!) |
 | ChromeOS | Debian 11 (docker with make-shared workaround #non-shared-mounts) <br> Debian 12 (podman) | using built-in Linux on ChromeOS mode which is debian-based, which can be [upgraded](https://wiki.debian.org/DebianUpgrade) from 11 bullseye to 12 bookworm (in fact 12 is recommended) |
@@ -62,15 +62,16 @@ Distrobox has been successfully tested on:
 | Gentoo | | To setup rootless podman, look [HERE](https://wiki.gentoo.org/wiki/Podman) |
 | KDE neon | | `distrobox` is available in default repo |
 | Manjaro | | To setup rootless podman, look [HERE](https://wiki.archlinux.org/title/Podman) |
-| NixOS | 21.11 | Make sure to mind your executable paths. Sometimes a container will not have nix paths, and sometimes it will not have its own paths.  <br>  Distrobox is available in Nixpkg collection (thanks [AtilaSaraiva](https://github.com/AtilaSaraiva)!)< <br> To setup Docker, look [HERE](https://nixos.wiki/wiki/Docker)  <br> To setup Podman, look [HERE](https://nixos.wiki/wiki/Podman) and [HERE](https://gist.github.com/adisbladis/187204cb772800489ee3dac4acdd9947) |
-| openSUSE | Leap 15.4 <br> Leap 15.3 <br> Leap 15.2 | Packages are available [here](https://software.opensuse.org/download/package?package=distrobox&project=home%3Adfaggioli%3Amicroos-desktop) (thanks [dfaggioli](https://github.com/dfaggioli)!).<br> To install on openSUSE Leap 15, Use the following repository links in the `zypper addrepo` command: [15.4](https://download.opensuse.org/repositories/home:dfaggioli:microos-desktop/15.4/home:dfaggioli:microos-desktop.repo), [15.3](https://download.opensuse.org/repositories/home:dfaggioli:microos-desktop/15.3/home:dfaggioli:microos-desktop.repo), [15.2](https://download.opensuse.org/repositories/home:dfaggioli:microos-desktop/15.2/home:dfaggioli:microos-desktop.repo). Then: <br>  `zypper refresh && zypper install distrobox`. <br> `Podman` under SUSE Leap, cannot initialize correctly the containers managed by ``distrobox`` until [this openSUSE bug](https://bugzilla.opensuse.org/show_bug.cgi?id=1199871) is fixed, or ``podman`` logging is configured properly. |
-| openSUSE | Tumbleweed <br> MicroOS | `distrobox` is available in default repos (thanks [dfaggioli](https://github.com/dfaggioli)!) <br> For Tumbleweed, do: `zypper install distrobox`. <br> For MicroOS, **distrobox is installed by default**. |
-| SUSE Linux Enterprise Server | 15&nbsp;Service&nbsp;Pack&nbsp;4 <br> 15&nbsp;Service&nbsp;Pack&nbsp;3 <br> 15&nbsp;Service&nbsp;Pack&nbsp;2 | Same procedure as the one for openSUSE (Leap, respective versions, of course). Use the following repository links in the `zypper addrepo` command: [SLE-15-SP4](https://download.opensuse.org/repositories/home:dfaggioli:microos-desktop/15.4/home:dfaggioli:microos-desktop.repo), [SLE-15-SP3](https://download.opensuse.org/repositories/home:dfaggioli:microos-desktop/15.3/home:dfaggioli:microos-desktop.repo), [SLE-15-SP4](https://download.opensuse.org/repositories/home:dfaggioli:microos-desktop/SLE_15_SP2/home:dfaggioli:microos-desktop.repo). Then: <br>  `zypper refresh && zypper install distrobox`. <br> `Podman` under SUSE Leap, cannot initialize correctly the containers managed by ``distrobox`` until [this openSUSE bug](https://bugzilla.opensuse.org/show_bug.cgi?id=1199871) is fixed, or ``podman`` logging is configured properly. |
+| NixOS | 21.11 | Make sure to mind your executable paths. Sometimes a container will not have nix paths, and sometimes it will not have its own paths.  <br>  Distrobox is available in Nixpkg collection (thanks [AtilaSaraiva](https://github.com/AtilaSaraiva)!)< <br> To setup Docker, look [HERE](https://wiki.nixos.org/wiki/Docker)  <br> To setup Podman, look [HERE](https://wiki.nixos.org/wiki/Podman) and [HERE](https://gist.github.com/adisbladis/187204cb772800489ee3dac4acdd9947) |
+| openSUSE | Leap | `distrobox` is available in default repos (thanks [dfaggioli](https://github.com/dfaggioli)!). <br> Prior to Leap 15.6 ``podman`` logging needs to be configured properly, more details in [this openSUSE bug](https://bugzilla.opensuse.org/show_bug.cgi?id=1199871). |
+| openSUSE | Tumbleweed <br> Slowroll <br> Aeon/Kalpa | `distrobox` is available in default repos (thanks [dfaggioli](https://github.com/dfaggioli)!) <br> For Tumbleweed/Slowroll, do: `zypper install distrobox`. <br> For Aeon/Kalpa, **distrobox is installed by default**. |
+| SUSE Linux Enterprise Server | 15 SP5 <br> or later | `distrobox` is available in `SUSE Package Hub` repo. <br> Enable this repo and then: <br> `zypper install distrobox`. <br>Prior to SLES 15 SP6 ``podman`` logging needs to be configured properly, more details in [this openSUSE bug](https://bugzilla.opensuse.org/show_bug.cgi?id=1199871). |
 | SteamOS | | You can follow the [Install Podman in a static manner](posts/install_podman_static.md) or [Install Lilipod in a static manner](posts/install_lilipod_static.md) guide, this will install it in your $HOME and it will survive updates. |
 | RedHat | 8 <br> 9  | `distrobox` is available in epel repos. (thanks [alcir](https://github.com/alcir)!) |
-| Ubuntu | 18.04 <br> 20.04 <br> 22.04 <br> 22.10 <br> 23.04 <br>| Older versions based on 20.04 or earlier may need external repos to install newer Podman and Docker releases. <br> Derivatives like Pop_OS!, Mint and Elementary OS should work the same. <br> [Now PPA available!](https://launchpad.net/~michel-slm/+archive/ubuntu/distrobox), also `distrobox` is available in default repos from `22.10` onward (thanks [michel-slm](https://github.com/michel-slm)!)  |
+| Ubuntu | 18.04 <br> 20.04 <br> 22.04 <br> 23.04 <br> 24.04 <br>| Older versions based on 20.04 or earlier may need external repos to install newer Podman and Docker releases. <br> Derivatives like Pop_OS!, Mint and Elementary OS should work the same. <br> [Now PPA available!](https://launchpad.net/~michel-slm/+archive/ubuntu/distrobox), also `distrobox` is available in default repos from `22.10` onward (thanks [michel-slm](https://github.com/michel-slm)!)  |
 | Vanilla OS | 22.10 <br> Orchid | `distrobox` should be installed in the home directory using the official script |
-| Void Linux | glibc | |
+| Void Linux | glibc <br> musl | |
+| Windows | Oracle Linux 9 | using built-in Windows Subsystem for Linux |
 
 ### Compatibility notes
 
@@ -114,48 +115,49 @@ Distrobox guests tested successfully with the following container images:
 |    Distro  |    Version | Images    |
 | --- | --- | --- |
 | AlmaLinux (Toolbox) | 8 <br> 9 | quay.io/toolbx-images/almalinux-toolbox:8 <br> quay.io/toolbx-images/almalinux-toolbox:9 <br> quay.io/toolbx-images/almalinux-toolbox:latest |
-| Alpine (Toolbox) | 3.16 <br> 3.17 <br> 3.18 <br> edge | quay.io/toolbx-images/alpine-toolbox:3.16 <br> quay.io/toolbx-images/alpine-toolbox:3.17 <br> quay.io/toolbx-images/alpine-toolbox:3.18 <br> quay.io/toolbx-images/alpine-toolbox:edge <br> quay.io/toolbx-images/alpine-toolbox:latest |
+| Alpine (Toolbox) | 3.16 <br> 3.17 <br> 3.18 <br> 3.19 <br> 3.20 <br> edge | quay.io/toolbx-images/alpine-toolbox:3.16 <br> quay.io/toolbx-images/alpine-toolbox:3.17 <br> quay.io/toolbx-images/alpine-toolbox:3.18 <br> quay.io/toolbx-images/alpine-toolbox:3.19 <br> quay.io/toolbx-images/alpine-toolbox:3.20 <br> quay.io/toolbx-images/alpine-toolbox:edge <br> quay.io/toolbx-images/alpine-toolbox:latest |
 | AmazonLinux (Toolbox) | 2 <br> 2022 | quay.io/toolbx-images/amazonlinux-toolbox:2 <br> quay.io/toolbx-images/amazonlinux-toolbox:2023 <br> quay.io/toolbx-images/amazonlinux-toolbox:latest |
-| Archlinux (Toolbox) | | quay.io/toolbx-images/archlinux-toolbox:latest |
+| Archlinux (Toolbox) | | quay.io/toolbx/arch-toolbox:latest |
 | Bazzite Arch | | ghcr.io/ublue-os/bazzite-arch:latest <br> ghcr.io/ublue-os/bazzite-arch-gnome:latest |
 | Centos (Toolbox) | stream8 <br> stream9 | quay.io/toolbx-images/centos-toolbox:stream8 <br> quay.io/toolbx-images/centos-toolbox:stream9 <br> quay.io/toolbx-images/centos-toolbox:latest |
 | Debian (Toolbox) | 10 <br> 11 <br> 12 <br> testing <br> unstable <br> | quay.io/toolbx-images/debian-toolbox:10 <br> quay.io/toolbx-images/debian-toolbox:11 <br> quay.io/toolbx-images/debian-toolbox:12 <br> quay.io/toolbx-images/debian-toolbox:testing <br> quay.io/toolbx-images/debian-toolbox:unstable <br> quay.io/toolbx-images/debian-toolbox:latest |
-| Fedora (Toolbox) | 36 <br> 37 <br> 38 <br> 39 <br> Rawhide | registry.fedoraproject.org/fedora-toolbox:37 <br> registry.fedoraproject.org/fedora-toolbox:38 <br> registry.fedoraproject.org/fedora-toolbox:39 <br> registry.fedoraproject.org/fedora-toolbox:latest |
-| openSUSE (Toolbox) | | registry.opensuse.org/opensuse/distrobox:latest <br> quay.io/toolbx-images/opensuse-toolbox:tumbleweed <br> quay.io/toolbx-images/opensuse-toolbox:latest |
-| RedHat (Toolbox) | 8 <br> 9 | registry.access.redhat.com/ubi8/toolbox <br> registry.access.redhat.com/ubi9/toolbox <br> quay.io/toolbx-images/rhel-toolbox:latest |
+| Fedora (Toolbox) | 37 <br> 38 <br> 39 <br> 40 <br> 41 <br> Rawhide | registry.fedoraproject.org/fedora-toolbox:37 <br> registry.fedoraproject.org/fedora-toolbox:38 <br> registry.fedoraproject.org/fedora-toolbox:39 <br> registry.fedoraproject.org/fedora-toolbox:40 <br> quay.io/fedora/fedora-toolbox:41 <br> quay.io/fedora/fedora-toolbox:rawhide |
+| openSUSE (Toolbox) | | registry.opensuse.org/opensuse/distrobox:latest |
+| RedHat (Toolbox) | 8 <br> 9 | registry.access.redhat.com/ubi8/toolbox <br> registry.access.redhat.com/ubi9/toolbox |
 | Rocky Linux (Toolbox) | 8 <br> 9 | quay.io/toolbx-images/rockylinux-toolbox:8 <br> quay.io/toolbx-images/rockylinux-toolbox:9 <br> quay.io/toolbx-images/rockylinux-toolbox:latest |
-| Ubuntu (Toolbox) | 16.04 <br> 18.04 <br> 20.04 <br> 22.04 | quay.io/toolbx-images/ubuntu-toolbox:16.04 <br> quay.io/toolbx-images/ubuntu-toolbox:18.04 <br> quay.io/toolbx-images/ubuntu-toolbox:20.04 <br> quay.io/toolbx-images/ubuntu-toolbox:22.04 <br> quay.io/toolbx-images/ubuntu-toolbox:latest |
+| Ubuntu (Toolbox) | 16.04 <br> 18.04 <br> 20.04 <br> 22.04 <br> 24.04 | quay.io/toolbx/ubuntu-toolbox:16.04 <br> quay.io/toolbx/ubuntu-toolbox:18.04 <br> quay.io/toolbx/ubuntu-toolbox:20.04 <br> quay.io/toolbx/ubuntu-toolbox:22.04 <br> quay.io/toolbx/ubuntu-toolbox:24.04 <br> quay.io/toolbx/ubuntu-toolbox:latest |
+| Chainguard Wolfi (Toolbox) | | quay.io/toolbx-images/wolfi-toolbox:latest |
+| Ublue | bluefin-cli <br> ubuntu-toolbox <br> fedora-toolbox <br> wolfi-toolbox <br> archlinux-distrobox <br> powershell-toolbox | ghcr.io/ublue-os/bluefin-cli <br> ghcr.io/ublue-os/bluefin-cli <br> ghcr.io/ublue-os/ubuntu-toolbox <br> ghcr.io/ublue-os/fedora-toolbox <br> ghcr.io/ublue-os/wolfi-toolbox <br> ghcr.io/ublue-os/arch-distrobox <br> ghcr.io/ublue-os/powershell-toolbox |
 |  |  |  |
-| AlmaLinux (UBI) | 8 | quay.io/almalinux/8-base:8 <br> quay.io/almalinux/8-init:8 |
-| AlmaLinux | 8 <br> 8-minimal <br> 9 <br> 9-minimal | quay.io/almalinux/almalinux:8 <br> quay.io/almalinux/almalinux:9 <br> quay.io/almalinux/almalinux:9-minimal |
-| Alpine Linux    | 3.15 <br> 3.16 | docker.io/library/alpine:3.15 <br> docker.io/library/alpine:3.16 <br> docker.io/library/alpine:latest |
+| AlmaLinux | 8 <br> 8-minimal <br> 9 <br> 9-minimal | docker.io/library/almalinux:8 <br> docker.io/library/almalinux:9  |
+| Alpine Linux    | 3.15 <br> 3.16 <br> 3.17 <br> 3.18 <br> 3.19 <br> 3.20 <br> edge | docker.io/library/alpine:3.15 <br> docker.io/library/alpine:3.16 <br> docker.io/library/alpine:3.17 <br> docker.io/library/alpine:3.18 <br> docker.io/library/alpine:3.19 <br> docker.io/library/alpine:3.20 <br> docker.io/library/alpine:edge <br> docker.io/library/alpine:latest |
 | AmazonLinux | 1 <br> 2 <br> 2023 | public.ecr.aws/amazonlinux/amazonlinux:1 <br> public.ecr.aws/amazonlinux/amazonlinux:2 <br>  public.ecr.aws/amazonlinux/amazonlinux:2023 |
 | Archlinux     | | docker.io/library/archlinux:latest    |
+| Blackarch     | | docker.io/blackarchlinux/blackarch:latest    |
 | CentOS Stream | 8 <br> 9 | quay.io/centos/centos:stream8 <br> quay.io/centos/centos:stream9  |
-| CentOS | 7 | quay.io/centos/centos:7  |
-| Chainguard Wolfi | Small note: sudo is missing, use su-exec instead. | cgr.dev/chainguard/wolfi-base:latest |
+| Chainguard Wolfi | | cgr.dev/chainguard/wolfi-base:latest |
 | ClearLinux |      | docker.io/library/clearlinux:latest <br> docker.io/library/clearlinux:base    |
-| Crystal Linux | | registry.getcryst.al/crystal/misc/docker:latest |
-| Debian | 7 <br> 8 <br> 9 <br> 10 <br> 11 <br> 12 | docker.io/debian/eol:wheezy <br> docker.io/library/debian:buster-backports <br> docker.io/library/debian:bullseye-backports <br> docker.io/library/debian:bookworm-backports <br> docker.io/library/debian:stable-backports |
+| Crystal Linux | | registry.gitlab.com/crystal-linux/misc/docker:latest  |
+| Debian | 7 <br> 8 <br> 9 <br> 10 <br> 11 <br> 12 | docker.io/debian/eol:wheezy <br> docker.io/library/debian:buster <br> docker.io/library/debian:bullseye-backports <br> docker.io/library/debian:bookworm-backports <br> docker.io/library/debian:stable-backports |
 | Debian | Testing    | docker.io/library/debian:testing  <br>  docker.io/library/debian:testing-backports    |
 | Debian | Unstable | docker.io/library/debian:unstable    |
-| deepin | 20 (apricot) <br> 23 (beige) | docker.io/linuxdeepin/apricot  <br>  docker.io/linuxdeepin/beige    |
-| Fedora | 36 <br> 37 <br> 38 <br> 39 <br> Rawhide | quay.io/fedora/fedora:36 <br> registry.fedoraproject.org/fedora:37 <br> quay.io/fedora/fedora:38 <br> quay.io/fedora/fedora:39  |
+| deepin | 20 (apricot) <br> 23 (beige) | docker.io/linuxdeepin/apricot <br> docker.io/linuxdeepin/deepin:beige |
+| Fedora | 36 <br> 37 <br> 38 <br> 39 <br> 40 <br> 41 <br> Rawhide | quay.io/fedora/fedora:36 <br> quay.io/fedora/fedora:37 <br> quay.io/fedora/fedora:38 <br> quay.io/fedora/fedora:39 <br> quay.io/fedora/fedora:40 <br> quay.io/fedora/fedora:41 <br> quay.io/fedora/fedora:rawhide  |
 | Gentoo Linux | rolling | docker.io/gentoo/stage3:latest |
-| KDE neon | Latest <br> Testing <br> Unstable | invent-registry.kde.org/neon/docker-images/plasma:latest <br> invent-registry.kde.org/neon/docker-images/plasma:testing <br> invent-registry.kde.org/neon/docker-images/plasma:unstable |
+| KDE neon | Latest | invent-registry.kde.org/neon/docker-images/plasma:latest |
 | Kali Linux | rolling | docker.io/kalilinux/kali-rolling:latest |
 | Mint | 21.1 | docker.io/linuxmintd/mint21.1-amd64 |
 | Neurodebian | nd100 | docker.io/library/neurodebian:nd100 |
 | openSUSE | Leap | registry.opensuse.org/opensuse/leap:latest    |
-| openSUSE | Tumbleweed | registry.opensuse.org/opensuse/tumbleweed:latest  <br>  registry.opensuse.org/opensuse/toolbox:latest    |
+| openSUSE | Tumbleweed | registry.opensuse.org/opensuse/distrobox:latest  <br> registry.opensuse.org/opensuse/tumbleweed:latest  <br>  registry.opensuse.org/opensuse/toolbox:latest    |
 | Oracle Linux | 7 <br> 7-slim <br> 8 <br> 8-slim <br> 9 <br> 9-slim |container-registry.oracle.com/os/oraclelinux:7 <br> container-registry.oracle.com/os/oraclelinux:7-slim <br> container-registry.oracle.com/os/oraclelinux:8 <br> container-registry.oracle.com/os/oraclelinux:8-slim <br> container-registry.oracle.com/os/oraclelinux:9 <br> container-registry.oracle.com/os/oraclelinux:9-slim  |
-| RedHat (UBI) | 7 <br> 8 <br> 9 | registry.access.redhat.com/ubi7/ubi <br> registry.access.redhat.com/ubi7/ubi-init <br> registry.access.redhat.com/ubi8/ubi <br> registry.access.redhat.com/ubi8/ubi-init <br> registry.access.redhat.com/ubi8/ubi-minimal <br> registry.access.redhat.com/ubi9/ubi <br> registry.access.redhat.com/ubi9/ubi-init <br> registry.access.redhat.com/ubi9/ubi-minimal |
+| RedHat (UBI) | 7 <br> 8 <br> 9 | registry.access.redhat.com/ubi7/ubi <br> registry.access.redhat.com/ubi8/ubi <br> registry.access.redhat.com/ubi8/ubi-init <br> registry.access.redhat.com/ubi8/ubi-minimal <br> registry.access.redhat.com/ubi9/ubi <br> registry.access.redhat.com/ubi9/ubi-init <br> registry.access.redhat.com/ubi9/ubi-minimal |
 | Rocky Linux | 8 <br> 8-minimal <br> 9 | quay.io/rockylinux/rockylinux:8 <br> quay.io/rockylinux/rockylinux:8-minimal <br> quay.io/rockylinux/rockylinux:9 <br> quay.io/rockylinux/rockylinux:latest    |
-| Scientific Linux | 7 | docker.io/library/sl:7    |
-| Slackware | 14.2 | docker.io/vbatts/slackware:14.2    |
-| Ubuntu | 14.04 <br> 16.04 <br> 18.04 <br> 20.04 <br> 22.04 <br> 23.04 | docker.io/library/ubuntu:14.04 <br> docker.io/library/ubuntu:16.04 <br> docker.io/library/ubuntu:18.04 <br> docker.io/library/ubuntu:20.04 <br> docker.io/library/ubuntu:22.04 |
+| Slackware | | docker.io/vbatts/slackware:current |
+| SteamOS | | ghcr.io/linuxserver/steamos:latest |
+| Ubuntu | 14.04 <br> 16.04 <br> 18.04 <br> 20.04 <br> 22.04 <br> 24.04 | docker.io/library/ubuntu:14.04 <br> docker.io/library/ubuntu:16.04 <br> docker.io/library/ubuntu:18.04 <br> docker.io/library/ubuntu:20.04 <br> docker.io/library/ubuntu:22.04 <br> docker.io/library/ubuntu:24.04 |
 | Vanilla OS | VSO | ghcr.io/vanilla-os/vso:main |
-| Void Linux | | ghcr.io/void-linux/void-linux:latest-full-x86_64 |
+| Void Linux | glibc <br> musl | ghcr.io/void-linux/void-glibc-full:latest <br> ghcr.io/void-linux/void-musl-full:latest |
 
 Images marked with **Toolbox** are tailored images made by the community efforts in [toolbx-images/images](https://github.com/toolbx-images/images),
 so they are more indicated for desktop use, and first setup will take less time.

@@ -19,7 +19,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
 
       - name: Run dash -n
         run: |
@@ -37,7 +37,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
 
       - name: Run shfmt
         run: |
@@ -46,7 +46,7 @@ jobs:
           for file in $(find . -type f -not -path "*.git*"); do
             if file "$file" | grep -qi shell; then
               echo "### Checking file $file..."
-              podman run --rm -v "$PWD:/mnt" docker.io/peterdavehello/shfmt:latest shfmt -d -s -ci -sr -kp /mnt/$file
+              podman run --rm -v "$PWD:/mnt" docker.io/peterdavehello/shfmt:latest shfmt -d -s -ci -sr -kp -fn -i=0 -p /mnt/$file
               result=$(( result + $? ))
             fi
           done
@@ -57,7 +57,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
 
       # Exclude from bashate the following rules:
       #   - SC2310 we don't want to exit if errors happen inside a check, that's why we have a check...
@@ -85,12 +85,12 @@ jobs:
       security-events: write
 
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
       - name: Run Differential ShellCheck
-        uses: redhat-plumbers-in-action/differential-shellcheck@v4
+        uses: redhat-plumbers-in-action/differential-shellcheck@v5
         with:
           severity: style
           token: ${{ secrets.GITHUB_TOKEN }}
@@ -99,7 +99,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
       # Exclude from bashate the following rules:
       #   - E002 we use tab indentation as suggested by shfmt.
       #   - E003 we use tab indentation as suggested by shfmt.
@@ -121,7 +121,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
 
       - name: Run markdownlint
         run: |
@@ -132,8 +132,22 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
 
-      - uses: codespell-project/actions-codespell@v1
+      - uses: codespell-project/actions-codespell@v2
         with:
           skip: .git,*.pdf,*.1,*.css,*.lock
+
+  shell-funcheck:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run shell-funcheck
+        run: |
+          curl -L -O https://github.com/89luca89/shell-funcheck/releases/download/v0.0.1/shell-funcheck-amd64
+          chmod +x ./shell-funcheck-amd64
+          for i in distrobox*; do
+          ./shell-funcheck-amd64 check "$i"
+          done
